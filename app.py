@@ -28,7 +28,6 @@ df_emiten, nama_file_aktif = load_data_auto()
 def style_target(val):
     try:
         if isinstance(val, str):
-            # Bersihkan format ribuan dan persen untuk pengecekan angka
             clean_val = val.replace('%', '').replace(',', '')
             num_val = float(clean_val)
         else:
@@ -49,19 +48,23 @@ if df_emiten is not None:
     st.sidebar.success(f"✅ Menggunakan: {nama_file_aktif}")
     st.sidebar.header("Filter & Konfigurasi")
     
-    # 1. FILTER KODE SAHAM (SEARCH BOX)
+    # 1. FILTER KODE SAHAM
     st.sidebar.subheader("Cari Kode Saham")
-    all_tickers = df_emiten['Kode Saham'].dropna().unique().tolist()
+    all_tickers = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
     selected_tickers = st.sidebar.multiselect(
         "Pilih atau Ketik Kode Saham:",
         options=all_tickers,
-        help="Kosongkan jika ingin menampilkan semua saham berdasarkan filter harga"
+        help="Jika diisi, filter harga di bawah akan diabaikan."
     )
 
     # 2. FILTER HARGA
     st.sidebar.subheader("Rentang Harga (IDR)")
-    min_price = st.sidebar.number_input("Harga Minimal", min_value=0, value=50, step=1)
-    max_price = st.sidebar.number_input("Harga Maksimal", min_value=0, value=1500, step=1)
+    # Berikan catatan visual di UI
+    if selected_tickers:
+        st.sidebar.caption("⚠️ Filter harga sedang diabaikan (Mode Cari Kode)")
+    
+    min_price = st.sidebar.number_input("Harga Minimal", min_value=0, value=50)
+    max_price = st.sidebar.number_input("Harga Maksimal", min_value=0, value=1500)
     
     st.sidebar.markdown("---")
     tipe = st.sidebar.radio("Tampilkan Data:", ("Harga Penutupan (IDR)", "Perubahan (%)"))
@@ -72,39 +75,48 @@ if df_emiten is not None:
 
     if st.sidebar.button("🚀 Tarik Data"):
         with st.spinner('Sedang menarik data...'):
-            # Logika filter emiten sebelum download
-            df_to_fetch = df_emiten.copy()
+            # Menentukan list ticker yang akan didownload
             if selected_tickers:
-                df_to_fetch = df_to_fetch[df_to_fetch['Kode Saham'].isin(selected_tickers)]
+                # KONDISI: Kode Saham Diinput (Range Harga di-ignore)
+                df_to_fetch = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)]
+                mode_pencarian = "kode"
+            else:
+                # KONDISI: Kode Saham Kosong (Gunakan daftar semua emiten untuk difilter harga nanti)
+                df_to_fetch = df_emiten
+                mode_pencarian = "harga"
             
             tickers_jk = [str(k).strip() + ".JK" for k in df_to_fetch['Kode Saham'].dropna().unique()]
             
             if not tickers_jk:
-                st.warning("Tidak ada kode saham yang terpilih.")
+                st.warning("Daftar saham kosong.")
             else:
                 data = yf.download(tickers_jk, start=start_d, end=end_d, threads=True)['Close']
                 
                 if not data.empty:
-                    # Jika hanya 1 saham, yfinance mengembalikan Series, kita ubah ke DataFrame
                     if isinstance(data, pd.Series):
                         data = data.to_frame()
                     
                     df_work = data.ffill()
                     last_prices = df_work.iloc[-1]
                     
-                    # Tetap jalankan filter harga jika user tidak memilih kode saham spesifik
-                    # Jika user pilih kode saham, filter harga tetap berlaku sebagai filter tambahan
-                    saham_lolos = last_prices[(last_prices >= min_price) & (last_prices <= max_price)].index
-                    df_filtered = df_work[saham_lolos]
+                    # LOGIKA FILTERING FINAL
+                    if mode_pencarian == "kode":
+                        # Ambil semua yang didownload tanpa filter harga
+                        df_filtered = df_work 
+                    else:
+                        # Filter berdasarkan rentang harga
+                        saham_lolos = last_prices[(last_prices >= min_price) & (last_prices <= max_price)].index
+                        df_filtered = df_work[saham_lolos]
 
                     if not df_filtered.empty:
+                        # Formatting Angka & Persen
                         if tipe == "Perubahan (%)":
-                            df_processed = (df_filtered.pct_change() * 100)
-                            df_final_data = df_processed.applymap(lambda x: f"{x:.1f}%".replace('.', ',') if pd.notnull(x) else "0,0%")
+                            df_raw = (df_filtered.pct_change() * 100)
+                            df_final_data = df_raw.applymap(lambda x: f"{x:.1f}%".replace('.', ',') if pd.notnull(x) else "0,0%")
                         else:
                             df_final_data = df_filtered.applymap(lambda x: f"{int(x):,}" if pd.notnull(x) else "0")
 
-                        # Format Tanggal
+                        # Format Tanggal di Index
                         df_final_data.index = df_final_data.index.strftime('%d/%m/%Y')
                         df_final_t = df_final_data.T
                         df_final_t.index = df_final_t.index.str.replace('.JK', '', regex=False)
@@ -120,11 +132,11 @@ if df_emiten is not None:
                         cols_to_style = df_display.columns[2:]
                         styled_df = df_display.style.applymap(style_target, subset=cols_to_style)
 
-                        st.success(f"Ditemukan {len(df_display)} saham.")
+                        st.success(f"Berhasil memuat {len(df_display)} saham.")
                         st.dataframe(styled_df, use_container_width=True)
                     else:
-                        st.warning(f"Tidak ada saham di range harga Rp{min_price} - Rp{max_price}")
+                        st.warning(f"Tidak ada saham yang ditemukan di rentang Rp{min_price} - Rp{max_price}")
                 else:
-                    st.error("Data tidak ditemukan di Yahoo Finance.")
+                    st.error("Gagal menarik data dari Yahoo Finance.")
 else:
     st.error("⚠️ File daftar saham tidak ditemukan di GitHub!")
