@@ -27,6 +27,7 @@ df_emiten, nama_file_aktif = load_data_auto()
 # --- FUNGSI WARNA (STYLER) ---
 def style_target(val):
     try:
+        # Menangani logika warna untuk string persen (8,7%)
         if isinstance(val, str) and '%' in val:
             num_val = float(val.replace('%', '').replace(',', '.'))
         else:
@@ -48,10 +49,9 @@ if df_emiten is not None:
     
     st.sidebar.header("Filter & Konfigurasi")
     
-    # MENGGANTI SLIDER DENGAN INPUT BOX
     st.sidebar.subheader("Rentang Harga (IDR)")
-    min_price = st.sidebar.number_input("Harga Minimal", min_value=0, max_value=200000, value=50, step=1)
-    max_price = st.sidebar.number_input("Harga Maksimal", min_value=0, max_value=200000, value=1500, step=1)
+    min_price = st.sidebar.number_input("Harga Minimal", min_value=0, value=50, step=1)
+    max_price = st.sidebar.number_input("Harga Maksimal", min_value=0, value=1500, step=1)
     
     st.sidebar.markdown("---")
     tipe = st.sidebar.radio("Tampilkan Data:", ("Harga Penutupan (IDR)", "Perubahan (%)"))
@@ -69,11 +69,13 @@ if df_emiten is not None:
                 data_filled = data.ffill()
                 last_val = data_filled.iloc[-1]
                 
-                # Filter berdasarkan input box harga
                 saham_lolos = last_val[(last_val >= min_price) & (last_val <= max_price)].index
                 df_filtered = data_filled[saham_lolos]
 
                 if not df_filtered.empty:
+                    # 1. FORMAT TANGGAL DI KOLOM (Ubah ke DD/MM/YYYY)
+                    df_filtered.columns = [c.strftime('%d/%m/%Y') for c in df_filtered.columns]
+
                     if tipe == "Perubahan (%)":
                         df_raw = (df_filtered.pct_change() * 100)
                         # Format 1 desimal dengan koma dan %
@@ -95,10 +97,10 @@ if df_emiten is not None:
                     cols_to_style = df_display.columns[2:]
                     styled_df = df_display.style.applymap(style_target, subset=cols_to_style)
 
-                    st.success(f"Ditemukan {len(df_display)} saham di rentang Rp{min_price} - Rp{max_price}")
+                    st.success(f"Ditemukan {len(df_display)} saham.")
                     st.dataframe(styled_df, use_container_width=True)
                 else:
-                    st.warning(f"Tidak ada saham di range Rp{min_price} - Rp{max_price}")
+                    st.warning("Tidak ada saham di range harga ini.")
             else:
                 st.error("Data kosong. Pilih rentang tanggal lain.")
 else:
