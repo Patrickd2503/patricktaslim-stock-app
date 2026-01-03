@@ -2,83 +2,84 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import date, timedelta
+import os
 
-st.set_page_config(page_title="Dashboard Saham BEI", layout="wide")
+# Konfigurasi halaman
+st.set_page_config(page_title="Monitor Saham BEI", layout="wide")
+
 st.title("📊 Monitoring Saham BEI")
+st.markdown("Aplikasi ini otomatis membaca daftar emiten dari GitHub Anda dan menarik data dari Yahoo Finance.")
+
+# --- SETTING NAMA FILE ---
+# Harus sama persis dengan yang ada di GitHub Anda
+FILE_NAME = 'Kode Saham.xlsx - Sheet1.csv'
+
+@st.cache_data
+def load_emiten():
+    if os.path.exists(FILE_NAME):
+        return pd.read_csv(FILE_NAME)
+    return None
+
+df_emiten = load_emiten()
 
 # --- SIDEBAR PENGATURAN ---
-st.sidebar.header("Konfigurasi & Filter")
-uploaded_file = st.sidebar.file_uploader("1. Upload Kode Saham.xlsx", type=["xlsx", "csv"])
+if df_emiten is not None:
+    st.sidebar.header("Filter & Konfigurasi")
+    
+    # 1. Slider Range Harga
+    min_p, max_p = st.sidebar.slider("Rentang Harga (IDR)", 50, 15000, (50, 1500))
+    
+    # 2. Tipe Data
+    tipe = st.sidebar.radio("Tampilkan Data:", ("Harga Penutupan (IDR)", "Perubahan (%)"))
+    
+    # 3. Rentang Tanggal
+    today = date.today()
+    start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=7))
+    end_d = st.sidebar.date_input("Tanggal Akhir", today)
 
-if uploaded_file:
-    try:
-        # Membaca file
-        if uploaded_file.name.endswith('.csv'):
-            df_emiten = pd.read_csv(uploaded_file)
-        else:
-            df_emiten = pd.read_excel(uploaded_file)
-        
-        if 'Kode Saham' in df_emiten.columns:
-            # 2. Pengaturan Filter Range Harga (50 - 15.000)
-            st.sidebar.subheader("Filter Harga")
-            min_price, max_price = st.sidebar.slider(
-                "Pilih Range Harga (IDR):", 
-                50, 15000, (50, 1500) # Default setting awal 50 - 1500, tapi bisa digeser sampai 15000
-            )
-
-            # 3. Pilihan Tipe Data & Tanggal
-            tipe_data = st.sidebar.radio("3. Tampilan Data:", ("Harga Penutupan (IDR)", "Kenaikan (%)"))
+    if st.sidebar.button("🚀 Ambil Data Terbaru"):
+        with st.spinner('Sedang menarik data 900+ emiten... Mohon tunggu sebentar.'):
+            # Menyiapkan list ticker dengan akhiran .JK
+            tickers = [str(k).strip() + ".JK" for k in df_emiten['Kode Saham'].dropna().unique()]
             
-            today = date.today()
-            # Default 7 hari ke belakang agar data selalu tersedia (menghindari hari libur)
-            start_date = st.sidebar.date_input("4. Tanggal Mulai", today - timedelta(days=7))
-            end_date = st.sidebar.date_input("5. Tanggal Akhir", today)
-
-            if st.sidebar.button("Tarik & Filter Data"):
-                with st.spinner('Sedang memproses data emiten...'):
-                    # Menyiapkan list ticker
-                    list_saham = [str(k).strip() + ".JK" for k in df_emiten['Kode Saham'].dropna().tolist()]
+            # Menarik data (menggunakan chunk/batch agar lebih stabil)
+            try:
+                data = yf.download(tickers, start=start_d, end=end_d, threads=True)['Close']
+                
+                if not data.empty:
+                    # Ambil harga terakhir untuk filter slider
+                    last_valid_row = data.ffill().iloc[-1]
+                    saham_lolos = last_valid_row[(last_valid_row >= min_p) & (last_valid_row <= max_p)].index
                     
-                    # Download data (Hanya kolom Close untuk efisiensi)
-                    data = yf.download(list_saham, start=start_date, end=end_date, threads=True)['Close']
-                    
-                    if not data.empty:
-                        # Ambil harga terakhir yang tersedia (baris paling bawah)
-                        last_prices = data.iloc[-1] 
-                        
-                        # Filter saham berdasarkan range harga user
-                        saham_lolos = last_prices[(last_prices >= min_price) & (last_prices <= max_price)].index
-                        
-                        df_filtered = data[saham_lolos]
+                    df_filtered = data[saham_lolos]
 
-                        if not df_filtered.empty:
-                            if tipe_data == "Kenaikan (%)":
-                                # Hitung perubahan persen dan transpose
-                                df_final = (df_filtered.pct_change() * 100).round(2).T
-                            else:
-                                df_final = df_filtered.round(0).T
-                            
-                            # Bersihkan index untuk penggabungan nama perusahaan
-                            df_final.index = df_final.index.str.replace('.JK', '', regex=False)
-                            
-                            # Gabungkan dengan Nama Perusahaan
-                            df_display = pd.merge(
-                                df_emiten[['Kode Saham', 'Nama Perusahaan']], 
-                                df_final, 
-                                left_on='Kode Saham', 
-                                right_index=True, 
-                                how='inner'
-                            )
-
-                            st.success(f"Berhasil memuat {len(df_display)} saham dalam range Rp{min_price} - Rp{max_price}")
-                            st.dataframe(df_display, use_container_width=True)
+                    if not df_filtered.empty:
+                        if tipe == "Perubahan (%)":
+                            df_final = (df_filtered.pct_change() * 100).round(2).T
                         else:
-                            st.warning(f"Tidak ada saham ditemukan di range Rp{min_price} - Rp{max_price}")
+                            df_final = df_filtered.round(0).T
+                        
+                        # Gabungkan dengan Nama Perusahaan
+                        df_final.index = df_final.index.str.replace('.JK', '', regex=False)
+                        df_display = pd.merge(
+                            df_emiten[['Kode Saham', 'Nama Perusahaan']], 
+                            df_final, 
+                            left_on='Kode Saham', 
+                            right_index=True, 
+                            how='inner'
+                        )
+
+                        st.success(f"Ditemukan {len(df_display)} saham di range Rp{min_p} - Rp{max_p}")
+                        st.dataframe(df_display, use_container_width=True)
+                        
+                        # Tombol Download
+                        csv = df_display.to_csv(index=False).encode('utf-8')
+                        st.download_button("📥 Download ke CSV", csv, "data_saham.csv", "text/csv")
                     else:
-                        st.error("Gagal menarik data. Pastikan bursa sedang buka pada tanggal tersebut.")
-        else:
-            st.error("Kolom 'Kode Saham' tidak ditemukan di file Anda.")
-    except Exception as e:
-        st.error(f"Error: {e}")
+                        st.warning("Tidak ada saham yang masuk dalam kriteria range harga tersebut.")
+                else:
+                    st.error("Data tidak ditemukan. Coba pilih rentang tanggal yang lebih luas.")
+            except Exception as e:
+                st.error(f"Terjadi kendala saat menarik data: {e}")
 else:
-    st.info("Silakan upload file 'Kode Saham.xlsx' untuk memulai.")
+    st.error(f"File '{FILE_NAME}' tidak ditemukan di repository GitHub Anda.")
