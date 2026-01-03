@@ -35,7 +35,7 @@ if df_emiten is not None:
     st.sidebar.success(f"✅ Menggunakan: {nama_file_aktif}")
     
     st.sidebar.header("Filter & Konfigurasi")
-    min_p, max_p = st.sidebar.slider("Rentang Harga (IDR)", 50, 15000, (50, 1500))
+    min_p, max_p = st.sidebar.slider("Rentang Harga (IDR)", 50, 2000, (50, 1500))
     tipe = st.sidebar.radio("Tampilkan Data:", ("Harga Penutupan (IDR)", "Perubahan (%)"))
     
     today = date.today()
@@ -84,3 +84,4 @@ else:
     if uploaded:
         df_emiten = pd.read_csv(uploaded) if uploaded.name.endswith('.csv') else pd.read_excel(uploaded)
         st.rerun()
+
