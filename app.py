@@ -49,6 +49,17 @@ if df_emiten is not None:
     st.sidebar.success(f"✅ Menggunakan: {nama_file_aktif}")
     st.sidebar.header("Filter & Konfigurasi")
     
+    # 1. FILTER KODE SAHAM (SEARCH BOX)
+    st.sidebar.subheader("Cari Kode Saham")
+    all_tickers = df_emiten['Kode Saham'].dropna().unique().tolist()
+    selected_tickers = st.sidebar.multiselect(
+        "Pilih atau Ketik Kode Saham:",
+        options=all_tickers,
+        help="Kosongkan jika ingin menampilkan semua saham berdasarkan filter harga"
+    )
+
+    # 2. FILTER HARGA
+    st.sidebar.subheader("Rentang Harga (IDR)")
     min_price = st.sidebar.number_input("Harga Minimal", min_value=0, value=50, step=1)
     max_price = st.sidebar.number_input("Harga Maksimal", min_value=0, value=1500, step=1)
     
@@ -61,47 +72,59 @@ if df_emiten is not None:
 
     if st.sidebar.button("🚀 Tarik Data"):
         with st.spinner('Sedang menarik data...'):
-            tickers = [str(k).strip() + ".JK" for k in df_emiten['Kode Saham'].dropna().unique()]
-            data = yf.download(tickers, start=start_d, end=end_d, threads=True)['Close']
+            # Logika filter emiten sebelum download
+            df_to_fetch = df_emiten.copy()
+            if selected_tickers:
+                df_to_fetch = df_to_fetch[df_to_fetch['Kode Saham'].isin(selected_tickers)]
             
-            if not data.empty:
-                df_work = data.ffill()
-                last_prices = df_work.iloc[-1]
-                saham_lolos = last_prices[(last_prices >= min_price) & (last_prices <= max_price)].index
-                df_filtered = df_work[saham_lolos]
-
-                if not df_filtered.empty:
-                    if tipe == "Perubahan (%)":
-                        df_processed = (df_filtered.pct_change() * 100)
-                        # Format 1 desimal (8,7%)
-                        df_final_data = df_processed.applymap(lambda x: f"{x:.1f}%".replace('.', ',') if pd.notnull(x) else "0,0%")
-                    else:
-                        # FORMAT HARGA: Tanpa desimal dan dengan pemisah ribuan (15,000)
-                        df_final_data = df_filtered.applymap(lambda x: f"{int(x):,}" if pd.notnull(x) else "0")
-
-                    # Format Tanggal di Index
-                    df_final_data.index = df_final_data.index.strftime('%d/%m/%Y')
-                    df_final_t = df_final_data.T
-                    df_final_t.index = df_final_t.index.str.replace('.JK', '', regex=False)
-                    
-                    df_display = pd.merge(
-                        df_emiten[['Kode Saham', 'Nama Perusahaan']], 
-                        df_final_t, 
-                        left_on='Kode Saham', 
-                        right_index=True, 
-                        how='inner'
-                    )
-
-                    cols_to_style = df_display.columns[2:]
-                    # Khusus Harga Penutupan, kita tidak perlu warna heatmap jika Anda hanya ingin angka bersih, 
-                    # namun saya tetap aktifkan warnanya agar konsisten (Harga > 0 tetap hijau transparan).
-                    styled_df = df_display.style.applymap(style_target, subset=cols_to_style)
-
-                    st.success(f"Ditemukan {len(df_display)} saham.")
-                    st.dataframe(styled_df, use_container_width=True)
-                else:
-                    st.warning("Tidak ada saham di range harga ini.")
+            tickers_jk = [str(k).strip() + ".JK" for k in df_to_fetch['Kode Saham'].dropna().unique()]
+            
+            if not tickers_jk:
+                st.warning("Tidak ada kode saham yang terpilih.")
             else:
-                st.error("Data kosong. Pilih rentang tanggal lain.")
+                data = yf.download(tickers_jk, start=start_d, end=end_d, threads=True)['Close']
+                
+                if not data.empty:
+                    # Jika hanya 1 saham, yfinance mengembalikan Series, kita ubah ke DataFrame
+                    if isinstance(data, pd.Series):
+                        data = data.to_frame()
+                    
+                    df_work = data.ffill()
+                    last_prices = df_work.iloc[-1]
+                    
+                    # Tetap jalankan filter harga jika user tidak memilih kode saham spesifik
+                    # Jika user pilih kode saham, filter harga tetap berlaku sebagai filter tambahan
+                    saham_lolos = last_prices[(last_prices >= min_price) & (last_prices <= max_price)].index
+                    df_filtered = df_work[saham_lolos]
+
+                    if not df_filtered.empty:
+                        if tipe == "Perubahan (%)":
+                            df_processed = (df_filtered.pct_change() * 100)
+                            df_final_data = df_processed.applymap(lambda x: f"{x:.1f}%".replace('.', ',') if pd.notnull(x) else "0,0%")
+                        else:
+                            df_final_data = df_filtered.applymap(lambda x: f"{int(x):,}" if pd.notnull(x) else "0")
+
+                        # Format Tanggal
+                        df_final_data.index = df_final_data.index.strftime('%d/%m/%Y')
+                        df_final_t = df_final_data.T
+                        df_final_t.index = df_final_t.index.str.replace('.JK', '', regex=False)
+                        
+                        df_display = pd.merge(
+                            df_emiten[['Kode Saham', 'Nama Perusahaan']], 
+                            df_final_t, 
+                            left_on='Kode Saham', 
+                            right_index=True, 
+                            how='inner'
+                        )
+
+                        cols_to_style = df_display.columns[2:]
+                        styled_df = df_display.style.applymap(style_target, subset=cols_to_style)
+
+                        st.success(f"Ditemukan {len(df_display)} saham.")
+                        st.dataframe(styled_df, use_container_width=True)
+                    else:
+                        st.warning(f"Tidak ada saham di range harga Rp{min_price} - Rp{max_price}")
+                else:
+                    st.error("Data tidak ditemukan di Yahoo Finance.")
 else:
     st.error("⚠️ File daftar saham tidak ditemukan di GitHub!")
