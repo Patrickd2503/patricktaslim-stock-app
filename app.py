@@ -27,17 +27,19 @@ df_emiten, nama_file_aktif = load_data_auto()
 # --- FUNGSI WARNA (STYLER) ---
 def style_target(val):
     try:
-        if isinstance(val, str) and '%' in val:
-            num_val = float(val.replace('%', '').replace(',', '.'))
+        if isinstance(val, str):
+            # Bersihkan format ribuan dan persen untuk pengecekan angka
+            clean_val = val.replace('%', '').replace(',', '')
+            num_val = float(clean_val)
         else:
             num_val = float(val)
             
         if num_val > 0:
-            return 'background-color: rgba(144, 238, 144, 0.4)' # Hijau
+            return 'background-color: rgba(144, 238, 144, 0.4)' 
         elif num_val < 0:
-            return 'background-color: rgba(255, 182, 193, 0.4)' # Merah
+            return 'background-color: rgba(255, 182, 193, 0.4)' 
         elif num_val == 0:
-            return 'background-color: rgba(255, 255, 0, 0.3)'   # Kuning
+            return 'background-color: rgba(255, 255, 0, 0.3)'   
     except:
         pass
     return ''
@@ -47,7 +49,6 @@ if df_emiten is not None:
     st.sidebar.success(f"✅ Menggunakan: {nama_file_aktif}")
     st.sidebar.header("Filter & Konfigurasi")
     
-    # Input Box Harga
     min_price = st.sidebar.number_input("Harga Minimal", min_value=0, value=50, step=1)
     max_price = st.sidebar.number_input("Harga Maksimal", min_value=0, value=1500, step=1)
     
@@ -64,33 +65,25 @@ if df_emiten is not None:
             data = yf.download(tickers, start=start_d, end=end_d, threads=True)['Close']
             
             if not data.empty:
-                # 1. Bersihkan data (Isi data kosong)
                 df_work = data.ffill()
-                
-                # 2. Filter berdasarkan harga terakhir
                 last_prices = df_work.iloc[-1]
                 saham_lolos = last_prices[(last_prices >= min_price) & (last_prices <= max_price)].index
                 df_filtered = df_work[saham_lolos]
 
                 if not df_filtered.empty:
-                    # 3. Hitung Tipe Data (Persen atau Harga)
                     if tipe == "Perubahan (%)":
                         df_processed = (df_filtered.pct_change() * 100)
-                        # Format angka ke string "8,7%"
+                        # Format 1 desimal (8,7%)
                         df_final_data = df_processed.applymap(lambda x: f"{x:.1f}%".replace('.', ',') if pd.notnull(x) else "0,0%")
                     else:
-                        df_final_data = df_filtered.round(0)
+                        # FORMAT HARGA: Tanpa desimal dan dengan pemisah ribuan (15,000)
+                        df_final_data = df_filtered.applymap(lambda x: f"{int(x):,}" if pd.notnull(x) else "0")
 
-                    # 4. FORMAT TANGGAL PADA INDEX (Hapus 00:00:00)
+                    # Format Tanggal di Index
                     df_final_data.index = df_final_data.index.strftime('%d/%m/%Y')
-                    
-                    # 5. Transpose (Tanggal jadi Kolom)
                     df_final_t = df_final_data.T
-                    
-                    # 6. Bersihkan nama Ticker (.JK)
                     df_final_t.index = df_final_t.index.str.replace('.JK', '', regex=False)
                     
-                    # 7. Gabungkan dengan Nama Perusahaan
                     df_display = pd.merge(
                         df_emiten[['Kode Saham', 'Nama Perusahaan']], 
                         df_final_t, 
@@ -99,8 +92,9 @@ if df_emiten is not None:
                         how='inner'
                     )
 
-                    # 8. Terapkan Warna
                     cols_to_style = df_display.columns[2:]
+                    # Khusus Harga Penutupan, kita tidak perlu warna heatmap jika Anda hanya ingin angka bersih, 
+                    # namun saya tetap aktifkan warnanya agar konsisten (Harga > 0 tetap hijau transparan).
                     styled_df = df_display.style.applymap(style_target, subset=cols_to_style)
 
                     st.success(f"Ditemukan {len(df_display)} saham.")
@@ -108,6 +102,6 @@ if df_emiten is not None:
                 else:
                     st.warning("Tidak ada saham di range harga ini.")
             else:
-                st.error("Data kosong. Silakan pilih rentang tanggal yang berbeda.")
+                st.error("Data kosong. Pilih rentang tanggal lain.")
 else:
     st.error("⚠️ File daftar saham tidak ditemukan di GitHub!")
