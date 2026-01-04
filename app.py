@@ -39,8 +39,15 @@ df_emiten, _ = load_data_auto()
 def style_control(val):
     try:
         num = float(str(val).replace('%', '').replace(',', '.'))
-        if num > 80: return 'background-color: #ff4b4b; color: white; font-weight: bold'
+        if num > 70: return 'background-color: #ff4b4b; color: white; font-weight: bold' # Disesuaikan ke 70
         if num > 50: return 'background-color: #ffa500; color: black'
+    except: pass
+    return ''
+
+def style_float(val):
+    try:
+        num = float(str(val).replace('%', '').replace(',', '.'))
+        if num < 40: return 'color: #008000; font-weight: bold' # Tetap di 40
     except: pass
     return ''
 
@@ -63,8 +70,8 @@ def export_to_excel(df_pct, df_prc, df_top=None):
         df_prc.to_excel(writer, index=False, sheet_name='3. Data Harga IDR')
     return output.getvalue()
 
-# --- 5. LOGIKA ANALISA ULTRA-SELEKTIF ---
-def get_signals_and_data(df_c, df_v):
+# --- 5. LOGIKA ANALISA (Sesuai Permintaan Baru) ---
+def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
     results, shortlist_keys = [], []
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
@@ -76,21 +83,28 @@ def get_signals_and_data(df_c, df_v):
         chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
         ticker = col.replace('.JK','')
         
-        ff_pct = get_free_float(col)
         vol_control_pct = (v_ratio / (v_ratio + 1)) * 100 
         
-        # --- KRITERIA ULTRA KETAT ---
-        is_sideways = abs(chg_5d) < 0.015 
-        is_high_control = vol_control_pct > 80 
-        is_liquid = (v_last / 100) > 1000 
-        is_low_float = ff_pct is not None and ff_pct < 40
-        
-        status = "Normal"
-        if is_sideways and v_ratio >= 1.5:
-            status = f"💎 Akumulasi (V:{v_ratio:.1f})"
-            if is_high_control and is_liquid and is_low_float:
-                shortlist_keys.append(ticker)
+        # Logika Shortlist hanya jalan jika tombol 'Analisa Lengkap' ditekan
+        ff_pct = None
+        if is_analisa_lengkap:
+            ff_pct = get_free_float(col)
             
+            # --- PARAMETER MODIFIKASI USER ---
+            is_sideways = abs(chg_5d) < 0.02    # Sideways diperlebar ke 2%
+            is_high_control = vol_control_pct > 70 # Vol Control diturunkan ke 70%
+            is_low_float = ff_pct is not None and ff_pct < 40 # Free Float tetap < 40%
+            is_liquid = (v_last / 100) > 500   # Likuiditas minimal 500 lot
+            
+            status = "Normal"
+            if is_sideways and v_ratio >= 1.2:
+                status = f"💎 Akumulasi (V:{v_ratio:.1f})"
+                if is_high_control and is_low_float and is_liquid:
+                    shortlist_keys.append(ticker)
+            elif chg_5d > 0.05: status = "🚀 Markup"
+        else:
+            status = "N/A (Gunakan Analisa Lengkap)"
+
         results.append({
             'Kode Saham': ticker,
             'Analisa Akumulasi': status,
@@ -111,11 +125,11 @@ if df_emiten is not None:
     end_d = st.sidebar.date_input("Akhir", date(2025, 12, 31))
 
     st.sidebar.markdown("---")
-    btn_split = st.sidebar.button("📊 1. Split View (Cepat)")
+    btn_split = st.sidebar.button("📊 1. Split View (All Data)")
     btn_analisa = st.sidebar.button("🚀 2. Jalankan Analisa Lengkap")
 
     if btn_split or btn_analisa:
-        with st.spinner('Menarik data bursa...'):
+        with st.spinner('Memproses data bursa...'):
             df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
             tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].dropna().unique()]
             df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
@@ -124,10 +138,9 @@ if df_emiten is not None:
                 df_c, df_v = df_c_raw.ffill(), df_v_raw.fillna(0)
                 last_p = df_c.iloc[-1]
                 saham_lolos = df_c.columns if selected_tickers else last_p[(last_p >= min_p) & (last_p <= max_p)].index
-                df_f_c = df_c[saham_lolos]
-                df_f_v = df_v[saham_lolos]
+                df_f_c, df_f_v = df_c[saham_lolos], df_v[saham_lolos]
                 
-                df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v)
+                df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v, is_analisa_lengkap=btn_analisa)
 
                 def prepare_display(df_data, is_pct=True):
                     if is_pct:
@@ -138,41 +151,40 @@ if df_emiten is not None:
                     df_t = df_f.T
                     df_t.index = df_t.index.str.replace('.JK', '', regex=False)
                     m = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_t, left_on='Kode Saham', right_index=True)
-                    if btn_analisa:
-                        m = pd.merge(m, df_analysis, on='Kode Saham', how='left')
-                        cols = list(m.columns)
-                        return m[[cols[0], cols[1], cols[-5], cols[-4], cols[-3], cols[-2], cols[-1]] + cols[2:-5]]
-                    return m
+                    m = pd.merge(m, df_analysis, on='Kode Saham', how='left')
+                    cols = list(m.columns)
+                    # Mengatur urutan kolom agar metadata berada di depan histori
+                    return m[[cols[0], cols[1], cols[-5], cols[-4], cols[-3], cols[-2], cols[-1]] + cols[2:-5]]
 
                 df_all_pct = prepare_display(df_f_c, is_pct=True)
                 df_all_prc = prepare_display(df_f_c, is_pct=False)
 
-                # OPSI 1: SPLIT VIEW
+                # --- OUTPUT OPSI 1: SPLIT VIEW ---
                 if btn_split:
-                    st.success("Mode Split View: Menampilkan data mentah tanpa shortlist.")
-                    st.download_button("📥 Download Excel (Data Mentah)", data=export_to_excel(df_all_pct, df_all_prc), file_name=f'Split_View_{end_d}.xlsx')
-                    st.subheader("📈 Monitor Persentase (%)")
-                    st.dataframe(df_all_pct.style.applymap(style_percentage, subset=df_all_pct.columns[2:]), use_container_width=True)
+                    st.success("Mode Split View: Menampilkan data histori tanpa filter Shortlist.")
+                    st.download_button("📥 Download Excel (Raw)", data=export_to_excel(df_all_pct, df_all_prc), file_name=f'Split_View_{end_d}.xlsx')
+                    st.subheader("📈 Monitor Persentase & Dominasi")
+                    st.dataframe(df_all_pct.style.applymap(style_percentage, subset=df_all_pct.columns[7:]), use_container_width=True)
                     st.subheader("💰 Monitor Harga (IDR)")
                     st.dataframe(df_all_prc, use_container_width=True)
 
-                # OPSI 2: ANALISA LENGKAP
+                # --- OUTPUT OPSI 2: ANALISA LENGKAP ---
                 elif btn_analisa:
                     df_top = df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)]
-                    st.success(f"Analisa Selesai! Ditemukan {len(shortlist_keys)} saham ultra-selektif.")
-                    st.download_button("📥 Download All to Excel (Lengkap)", data=export_to_excel(df_all_pct, df_all_prc, df_top), file_name=f'Analisa_Lengkap_{end_d}.xlsx')
+                    st.success(f"Analisa Selesai! Menggunakan Parameter: VC > 70%, FF < 40%, SW < 2%.")
+                    st.download_button("📥 Download All to Excel", data=export_to_excel(df_all_pct, df_all_prc, df_top), file_name=f'Analisa_Lengkap_{end_d}.xlsx')
                     
-                    st.subheader("🎯 Shortlist (Ultra-Selektif: >80% Control & <40% Float)")
+                    st.subheader("🎯 Shortlist Terpilih")
                     if not df_top.empty:
-                        st.dataframe(df_top.style.applymap(style_control, subset=['Vol Control (%)']).applymap(style_percentage, subset=df_top.columns[7:]), use_container_width=True)
+                        st.dataframe(df_top.style.applymap(style_control, subset=['Vol Control (%)'])
+                                     .applymap(style_float, subset=['Free Float (%)'])
+                                     .applymap(style_percentage, subset=df_top.columns[7:]), use_container_width=True)
                     else:
-                        st.warning("Tidak ada saham yang menembus filter ultra-ketat hari ini.")
+                        st.warning("Tidak ada saham yang memenuhi kriteria kombinasi ini.")
 
                     st.markdown("---")
                     st.subheader("📈 Monitor Persentase & Dominasi")
-                    st.dataframe(df_all_pct.style.applymap(style_control, subset=['Vol Control (%)']).applymap(style_percentage, subset=df_all_pct.columns[7:]), use_container_width=True)
-                    
-                    st.subheader("💰 Monitor Harga IDR")
-                    st.dataframe(df_all_prc, use_container_width=True)
-            else:
-                st.error("Koneksi gagal atau data tidak ditemukan.")
+                    st.dataframe(df_all_pct.style.applymap(style_control, subset=['Vol Control (%)'])
+                                 .applymap(style_float, subset=['Free Float (%)'])
+                                 .applymap(style_percentage, subset=df_all_pct.columns[7:]), use_container_width=True)
+            else: st.error("Data tidak ditemukan.")
