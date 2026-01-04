@@ -5,8 +5,8 @@ from datetime import date, timedelta
 import os
 from io import BytesIO
 
-st.set_page_config(page_title="Monitor Saham BEI Pro", layout="wide")
-st.title("📊 Smart Monitor: Export to Excel")
+st.set_page_config(page_title="Monitor Saham BEI Ultra", layout="wide")
+st.title("🎯 Dashboard Akumulasi Ultra-Selektif")
 
 # --- 1. FITUR CACHE ---
 @st.cache_data(ttl=3600)
@@ -26,66 +26,58 @@ def load_data_auto():
 
 df_emiten, nama_file_aktif = load_data_auto()
 
-# --- 3. FUNGSI EXPORT EXCEL (MULTI-SHEET) ---
-def to_excel_all(df_pct, df_prc, df_top):
+# --- 3. FUNGSI EXPORT EXCEL ---
+def export_to_excel(df_pct, df_prc, df_top):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Sheet 1: Shortlist
-        if not df_top.empty:
-            df_top.to_excel(writer, index=False, sheet_name='1. Top Picks Shortlist')
-        
-        # Sheet 2: Perubahan Persentase
-        df_pct.to_excel(writer, index=False, sheet_name='2. Perubahan Persen')
-        
-        # Sheet 3: Harga Penutupan
-        df_prc.to_excel(writer, index=False, sheet_name='3. Harga Harian IDR')
-        
-        # Format Kolom (Auto-fit sederhana)
-        workbook = writer.book
-        for sheet in writer.sheets.values():
-            header_format = workbook.add_format({'bold': True, 'bg_color': '#0070C0', 'font_color': 'white'})
-            sheet.set_column('A:B', 20) # Lebar kolom Kode & Nama
-            sheet.set_column('C:C', 25) # Lebar kolom Analisa
+        if not df_top.empty: df_top.to_excel(writer, index=False, sheet_name='Shortlist_Terpilih')
+        df_pct.to_excel(writer, index=False, sheet_name='Data_Persentase')
+        df_prc.to_excel(writer, index=False, sheet_name='Data_Harga_IDR')
     return output.getvalue()
 
-# --- 4. LOGIKA ANALISA ---
+# --- 4. LOGIKA ANALISA ULTRA-SELEKTIF ---
 def get_signals_and_shortlist(df_c, df_v):
     signals, shortlist = {}, []
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
         if len(c) < 5: continue
-        change_today = (c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]
-        change_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
+        
+        # PARAMETER KRITIS
+        chg_today = (c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]
+        chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
         v_sma5 = v.rolling(5).mean().iloc[-1]
         v_ratio = v.iloc[-1] / v_sma5 if v_sma5 > 0 else 0
         ticker = col.replace('.JK','')
         
+        # FILTER KETAT:
+        # 1. Akumulasi jika Sideways 5 hari (<2%) DAN Volume meledak (>1.5)
+        # 2. SHORTLIST jika Hari ini sangat tenang (abs < 0.01 / 1%)
         status = "Normal"
-        if abs(change_5d) < 0.02 and v_ratio > 1.2:
+        if abs(chg_5d) < 0.02 and v_ratio >= 1.5:
             status = f"💎 Akumulasi (V:{v_ratio:.1f})"
-            if abs(change_today) <= 0.015 and 1.2 <= v_ratio <= 2.5:
+            if abs(chg_today) <= 0.01: # Filter Harga Sangat Senyap
                 shortlist.append(ticker)
-        elif change_5d > 0.05 and v_ratio > 1.0:
+        elif chg_5d > 0.05 and v_ratio > 1.0:
             status = f"🚀 Markup (V:{v_ratio:.1f})"
-        elif change_5d < -0.05:
+        elif chg_5d < -0.05:
             status = "⛔ Distribusi"
+            
         signals[ticker] = status
     return signals, shortlist
 
 # --- 5. SIDEBAR & RENDER ---
 if df_emiten is not None:
-    st.sidebar.header("Konfigurasi")
+    st.sidebar.header("Filter")
     selected_tickers = st.sidebar.multiselect("Cari Kode:", options=sorted(df_emiten['Kode Saham'].dropna().unique().tolist()))
     min_p = st.sidebar.number_input("Harga Min", value=100)
     max_p = st.sidebar.number_input("Harga Max", value=300)
-    tipe = st.sidebar.radio("Mode Tampilan:", ("Perubahan (%)", "Harga (IDR)", "Split View (Keduanya)"))
     
     today = date.today()
     start_d = st.sidebar.date_input("Mulai", today - timedelta(days=20))
     end_d = st.sidebar.date_input("Akhir", today)
 
-    if st.sidebar.button("🚀 Jalankan Analisa"):
-        with st.spinner('Menyiapkan data Excel...'):
+    if st.sidebar.button("🚀 Jalankan Filter Otomatis"):
+        with st.spinner('Menyaring permata tersembunyi...'):
             df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
             tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].dropna().unique()]
             
@@ -105,7 +97,7 @@ if df_emiten is not None:
                         df_f = (df_data.pct_change() * 100).applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "0%")
                     else:
                         df_f = df_data.applymap(lambda x: int(x) if pd.notnull(x) else 0)
-                    df_f.index = df_f.index.strftime('%Y-%m-%d')
+                    df_f.index = df_f.index.strftime('%d/%m/%Y')
                     df_t = df_f.T
                     df_t.index = df_t.index.str.replace('.JK', '', regex=False)
                     m = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_t, left_on='Kode Saham', right_index=True)
@@ -113,33 +105,31 @@ if df_emiten is not None:
                     cols = list(f.columns)
                     return f[[cols[0], cols[1], cols[-1]] + cols[2:-1]]
 
-                # --- PROSES DATA UNTUK EXPORT ---
                 df_all_pct = prepare_display(df_f_c, is_pct=True)
                 df_all_prc = prepare_display(df_f_c, is_pct=False)
                 df_top = df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)]
 
-                # --- TOMBOL DOWNLOAD UTAMA ---
-                st.success("✅ Analisa Selesai!")
-                excel_file = to_excel_all(df_all_pct, df_all_prc, df_top)
+                # TOMBOL DOWNLOAD
                 st.download_button(
-                    label="📥 Download Data Lengkap (.xlsx)",
-                    data=excel_file,
-                    file_name=f'Analisa_Saham_BEI_{today}.xlsx',
+                    label="📥 Download Analisa Lengkap (.xlsx)",
+                    data=export_to_excel(df_all_pct, df_all_prc, df_top),
+                    file_name=f'Shortlist_BEI_{today}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                 )
 
+                # RENDER SHORTLIST
+                st.subheader("🎯 Shortlist: Akumulasi Senyap Terbaik")
+                if not df_top.empty: 
+                    st.success(f"Ditemukan {len(df_top)} saham potensial.")
+                    st.dataframe(df_top, use_container_width=True)
+                else: 
+                    st.warning("Tidak ada saham yang memenuhi kriteria ultra-selektif hari ini.")
+
+                # SPLIT VIEW
                 st.markdown("---")
+                st.subheader("📈 Monitor Persentase (%)")
+                st.dataframe(df_all_pct, use_container_width=True)
                 
-                # --- RENDER TAMPILAN (DASHBOARD) ---
-                st.subheader("🎯 Shortlist Akumulasi")
-                if not df_top.empty: st.dataframe(df_top, use_container_width=True)
-                else: st.warning("Tidak ada shortlist.")
-
-                if tipe in ["Perubahan (%)", "Split View (Keduanya)"]:
-                    st.subheader("📈 Tabel Perubahan (%)")
-                    st.dataframe(df_all_pct, use_container_width=True)
-
-                if tipe in ["Harga (IDR)", "Split View (Keduanya)"]:
-                    st.subheader("💰 Tabel Harga (IDR)")
-                    st.dataframe(df_all_prc, use_container_width=True)
-            else: st.error("Data gagal ditarik.")
+                st.subheader("💰 Monitor Harga IDR")
+                st.dataframe(df_all_prc, use_container_width=True)
+            else: st.error("Koneksi gagal.")
