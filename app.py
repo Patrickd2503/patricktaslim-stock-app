@@ -6,7 +6,7 @@ import os
 from io import BytesIO
 
 st.set_page_config(page_title="Monitor Saham BEI Ultra", layout="wide")
-st.title("🎯 Dashboard Akumulasi & Market Control")
+st.title("🎯 Dashboard Akumulasi: Market Control Analysis")
 
 # --- 1. FITUR CACHE ---
 @st.cache_data(ttl=3600)
@@ -27,8 +27,6 @@ def load_data_auto():
 df_emiten, _ = load_data_auto()
 
 # --- 3. FUNGSI PEWARNAAN ---
-
-# Warna untuk Kolom Volume Control
 def style_control(val):
     try:
         num = float(val.replace('%', '').replace(',', '.'))
@@ -37,17 +35,12 @@ def style_control(val):
     except: pass
     return ''
 
-# Warna untuk Kolom Persentase Harga
 def style_percentage(val):
     try:
-        if isinstance(val, str):
-            clean_val = val.replace('%', '').replace(',', '.')
-            num_val = float(clean_val)
-        else: num_val = float(val)
-        
-        if num_val > 0: return 'background-color: rgba(144, 238, 144, 0.4)' # Hijau Muda
-        elif num_val < 0: return 'background-color: rgba(255, 182, 193, 0.4)' # Merah Muda
-        elif num_val == 0: return 'background-color: rgba(255, 255, 0, 0.3)' # Kuning
+        num_val = float(val.replace('%', '').replace(',', '.'))
+        if num_val > 0: return 'background-color: rgba(144, 238, 144, 0.4)'
+        elif num_val < 0: return 'background-color: rgba(255, 182, 193, 0.4)'
+        elif num_val == 0: return 'background-color: rgba(255, 255, 0, 0.3)'
     except: pass
     return ''
 
@@ -56,7 +49,8 @@ def get_signals_and_data(df_c, df_v):
     results, shortlist_keys = [], []
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
-        if len(c) < 5: continue
+        if len(c) < 6: continue
+        
         chg_today = (c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]
         chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
         v_sma5 = v.rolling(5).mean().iloc[-1]
@@ -78,11 +72,12 @@ def get_signals_and_data(df_c, df_v):
             'Kode Saham': ticker,
             'Analisa Akumulasi': status,
             'Vol Control (%)': f"{vol_control_pct:.1f}%",
-            'Total Lot': f"{int(v_last/100):,}"
+            'Rata Lot (5D)': f"{int(v_sma5/100):,}",
+            'Total Lot (Today)': f"{int(v_last/100):,}"
         })
     return pd.DataFrame(results), shortlist_keys
 
-# --- 5. RENDER & LOGIKA DASHBOARD ---
+# --- 5. RENDER DASHBOARD ---
 if df_emiten is not None:
     st.sidebar.header("Filter")
     selected_tickers = st.sidebar.multiselect("Cari Kode:", options=sorted(df_emiten['Kode Saham'].dropna().unique().tolist()))
@@ -114,20 +109,18 @@ if df_emiten is not None:
                 m = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_t, left_on='Kode Saham', right_index=True)
                 f = pd.merge(m, df_analysis, on='Kode Saham', how='left')
                 cols = list(f.columns)
-                # Urutan: Kode, Nama, Analisa, Vol Control, Total Lot, Histori...
-                return f[[cols[0], cols[1], cols[-3], cols[-2], cols[-1]] + cols[2:-3]]
+                # Urutan: Kode, Nama, Analisa, Vol Control, Rata Lot, Total Lot, Histori...
+                return f[[cols[0], cols[1], cols[-4], cols[-3], cols[-2], cols[-1]] + cols[2:-4]]
 
             df_all_pct = prepare_display(df_f_c, is_pct=True)
             df_all_prc = prepare_display(df_f_c, is_pct=False)
             df_top = df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)]
 
-            # APLIKASI STYLE GANDA
             def apply_all_styles(df):
-                # subset untuk tanggal mulai dari kolom ke-6 (index 5)
                 return df.style.applymap(style_control, subset=['Vol Control (%)']) \
-                               .applymap(style_percentage, subset=df.columns[5:])
+                               .applymap(style_percentage, subset=df.columns[6:])
 
-            st.subheader("🎯 Shortlist: Akumulasi & High Control")
+            st.subheader("🎯 Shortlist: Akumulasi Ultra-Senyap")
             if not df_top.empty: st.dataframe(apply_all_styles(df_top), use_container_width=True)
             
             st.markdown("---")
