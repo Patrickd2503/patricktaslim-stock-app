@@ -49,13 +49,11 @@ def get_signals_and_shortlist(df_c, df_v):
         v_ratio = v.iloc[-1] / v_sma5 if v_sma5 > 0 else 0
         ticker = col.replace('.JK','')
         
-        # FILTER KETAT:
-        # 1. Akumulasi jika Sideways 5 hari (<2%) DAN Volume meledak (>1.5)
-        # 2. SHORTLIST jika Hari ini sangat tenang (abs < 0.01 / 1%)
+        # FILTER KETAT
         status = "Normal"
         if abs(chg_5d) < 0.02 and v_ratio >= 1.5:
             status = f"💎 Akumulasi (V:{v_ratio:.1f})"
-            if abs(chg_today) <= 0.01: # Filter Harga Sangat Senyap
+            if abs(chg_today) <= 0.01: # Harga sangat tenang
                 shortlist.append(ticker)
         elif chg_5d > 0.05 and v_ratio > 1.0:
             status = f"🚀 Markup (V:{v_ratio:.1f})"
@@ -65,7 +63,7 @@ def get_signals_and_shortlist(df_c, df_v):
         signals[ticker] = status
     return signals, shortlist
 
-# --- 5. SIDEBAR & RENDER ---
+# --- 5. SIDEBAR ---
 if df_emiten is not None:
     st.sidebar.header("Filter")
     selected_tickers = st.sidebar.multiselect("Cari Kode:", options=sorted(df_emiten['Kode Saham'].dropna().unique().tolist()))
@@ -76,7 +74,7 @@ if df_emiten is not None:
     start_d = st.sidebar.date_input("Mulai", today - timedelta(days=20))
     end_d = st.sidebar.date_input("Akhir", today)
 
-    if st.sidebar.button("🚀 Jalankan Filter Otomatis"):
+    if st.sidebar.button("🚀 Jalankan Analisa Lengkap"):
         with st.spinner('Menyaring permata tersembunyi...'):
             df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
             tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].dropna().unique()]
@@ -109,27 +107,30 @@ if df_emiten is not None:
                 df_all_prc = prepare_display(df_f_c, is_pct=False)
                 df_top = df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)]
 
-                # TOMBOL DOWNLOAD
+                # DOWNLOAD BUTTON
                 st.download_button(
-                    label="📥 Download Analisa Lengkap (.xlsx)",
+                    label="📥 Download Data Lengkap ke Excel (.xlsx)",
                     data=export_to_excel(df_all_pct, df_all_prc, df_top),
-                    file_name=f'Shortlist_BEI_{today}.xlsx',
+                    file_name=f'Analisa_Ultra_{today}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                 )
 
-                # RENDER SHORTLIST
-                st.subheader("🎯 Shortlist: Akumulasi Senyap Terbaik")
-                if not df_top.empty: 
-                    st.success(f"Ditemukan {len(df_top)} saham potensial.")
+                # 1. TABEL SHORTLIST
+                st.subheader("🎯 Shortlist: Akumulasi Ultra-Senyap")
+                if not df_top.empty:
+                    st.success(f"Ditemukan {len(df_top)} saham dengan volume gemuk tapi harga diam.")
                     st.dataframe(df_top, use_container_width=True)
-                else: 
-                    st.warning("Tidak ada saham yang memenuhi kriteria ultra-selektif hari ini.")
+                else:
+                    st.warning("Tidak ada saham yang memenuhi kriteria ultra-ketat saat ini.")
 
-                # SPLIT VIEW
                 st.markdown("---")
-                st.subheader("📈 Monitor Persentase (%)")
+
+                # 2. TABEL PERSENTASE
+                st.subheader("📈 Monitor Perubahan Harga (%)")
                 st.dataframe(df_all_pct, use_container_width=True)
-                
-                st.subheader("💰 Monitor Harga IDR")
+
+                # 3. TABEL HARGA IDR
+                st.subheader("💰 Monitor Harga Penutupan (IDR)")
                 st.dataframe(df_all_prc, use_container_width=True)
-            else: st.error("Koneksi gagal.")
+            else:
+                st.error("Gagal menarik data. Coba kurangi jumlah saham atau rentang tanggal.")
