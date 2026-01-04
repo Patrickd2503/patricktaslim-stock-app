@@ -6,7 +6,7 @@ import os
 from io import BytesIO
 
 st.set_page_config(page_title="Monitor Saham BEI Ultra", layout="wide")
-st.title("🎯 Dashboard Akumulasi Ultra-Selektif")
+st.title("🎯 Dashboard Akumulasi & Market Control")
 
 # --- 1. FITUR CACHE ---
 @st.cache_data(ttl=3600)
@@ -26,44 +26,53 @@ def load_data_auto():
 
 df_emiten, nama_file_aktif = load_data_auto()
 
-# --- 3. FUNGSI EXPORT EXCEL ---
-def export_to_excel(df_pct, df_prc, df_top):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        if not df_top.empty: df_top.to_excel(writer, index=False, sheet_name='Shortlist_Terpilih')
-        df_pct.to_excel(writer, index=False, sheet_name='Data_Persentase')
-        df_prc.to_excel(writer, index=False, sheet_name='Data_Harga_IDR')
-    return output.getvalue()
+# --- 3. FUNGSI WARNA & STYLE ---
+def style_control(val):
+    try:
+        num = float(val.replace('%', ''))
+        if num > 75: return 'background-color: #ff4b4b; color: white; font-weight: bold' # Ultra Control
+        if num > 50: return 'background-color: #ffa500; color: black' # Strong Control
+    except: pass
+    return ''
 
-# --- 4. LOGIKA ANALISA ULTRA-SELEKTIF ---
-def get_signals_and_shortlist(df_c, df_v):
-    signals, shortlist = {}, []
+# --- 4. LOGIKA ANALISA & VOLUME CONTROL ---
+def get_signals_and_data(df_c, df_v):
+    results = []
+    shortlist_keys = []
+    
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
         if len(c) < 5: continue
         
-        # PARAMETER KRITIS
         chg_today = (c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]
         chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
         v_sma5 = v.rolling(5).mean().iloc[-1]
-        v_ratio = v.iloc[-1] / v_sma5 if v_sma5 > 0 else 0
+        v_last = v.iloc[-1]
+        v_ratio = v_last / v_sma5 if v_sma5 > 0 else 0
         ticker = col.replace('.JK','')
         
-        # FILTER KETAT
+        # Teori Volume Control: Persentase dominasi volume hari ini terhadap rata-rata
+        # Kita gunakan rasio pertumbuhan volume sebagai proksi 'Control'
+        vol_control_pct = (v_ratio / (v_ratio + 1)) * 100 
+        
         status = "Normal"
         if abs(chg_5d) < 0.02 and v_ratio >= 1.5:
             status = f"💎 Akumulasi (V:{v_ratio:.1f})"
-            if abs(chg_today) <= 0.01: # Harga sangat tenang
-                shortlist.append(ticker)
+            if abs(chg_today) <= 0.01:
+                shortlist_keys.append(ticker)
         elif chg_5d > 0.05 and v_ratio > 1.0:
             status = f"🚀 Markup (V:{v_ratio:.1f})"
-        elif chg_5d < -0.05:
-            status = "⛔ Distribusi"
             
-        signals[ticker] = status
-    return signals, shortlist
+        results.append({
+            'Kode Saham': ticker,
+            'Analisa Akumulasi': status,
+            'Vol Control (%)': f"{vol_control_pct:.1f}%",
+            'Total Lot': f"{int(v_last/100):,}"
+        })
+        
+    return pd.DataFrame(results), shortlist_keys
 
-# --- 5. SIDEBAR ---
+# --- 5. SIDEBAR & RENDER ---
 if df_emiten is not None:
     st.sidebar.header("Filter")
     selected_tickers = st.sidebar.multiselect("Cari Kode:", options=sorted(df_emiten['Kode Saham'].dropna().unique().tolist()))
@@ -74,8 +83,8 @@ if df_emiten is not None:
     start_d = st.sidebar.date_input("Mulai", today - timedelta(days=20))
     end_d = st.sidebar.date_input("Akhir", today)
 
-    if st.sidebar.button("🚀 Jalankan Analisa Lengkap"):
-        with st.spinner('Menyaring permata tersembunyi...'):
+    if st.sidebar.button("🚀 Jalankan Analisa Ultra"):
+        with st.spinner('Menganalisa Dominasi Smart Money...'):
             df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
             tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].dropna().unique()]
             
@@ -87,8 +96,7 @@ if df_emiten is not None:
                 saham_lolos = df_c.columns if selected_tickers else last_p[(last_p >= min_p) & (last_p <= max_p)].index
                 
                 df_f_c, df_f_v = df_c[saham_lolos], df_v[saham_lolos]
-                signals_dict, shortlist_keys = get_signals_and_shortlist(df_f_c, df_f_v)
-                df_sig = pd.DataFrame(list(signals_dict.items()), columns=['Kode Saham', 'Analisa Akumulasi'])
+                df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v)
 
                 def prepare_display(df_data, is_pct=True):
                     if is_pct:
@@ -99,38 +107,26 @@ if df_emiten is not None:
                     df_t = df_f.T
                     df_t.index = df_t.index.str.replace('.JK', '', regex=False)
                     m = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_t, left_on='Kode Saham', right_index=True)
-                    f = pd.merge(m, df_sig, on='Kode Saham', how='left')
+                    f = pd.merge(m, df_analysis, on='Kode Saham', how='left')
+                    # Susun kolom agar Vol Control terlihat jelas di depan
                     cols = list(f.columns)
-                    return f[[cols[0], cols[1], cols[-1]] + cols[2:-1]]
+                    return f[[cols[0], cols[1], cols[-3], cols[-2], cols[-1]] + cols[2:-3]]
 
                 df_all_pct = prepare_display(df_f_c, is_pct=True)
                 df_all_prc = prepare_display(df_f_c, is_pct=False)
                 df_top = df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)]
 
-                # DOWNLOAD BUTTON
-                st.download_button(
-                    label="📥 Download Data Lengkap ke Excel (.xlsx)",
-                    data=export_to_excel(df_all_pct, df_all_prc, df_top),
-                    file_name=f'Analisa_Ultra_{today}.xlsx',
-                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                )
-
-                # 1. TABEL SHORTLIST
-                st.subheader("🎯 Shortlist: Akumulasi Ultra-Senyap")
+                # RENDER TAMPILAN
+                st.subheader("🎯 Shortlist: Akumulasi & High Control")
                 if not df_top.empty:
-                    st.success(f"Ditemukan {len(df_top)} saham dengan volume gemuk tapi harga diam.")
-                    st.dataframe(df_top, use_container_width=True)
+                    st.dataframe(df_top.style.applymap(style_control, subset=['Vol Control (%)']), use_container_width=True)
                 else:
-                    st.warning("Tidak ada saham yang memenuhi kriteria ultra-ketat saat ini.")
+                    st.warning("Tidak ada saham dengan kriteria Ultra Control.")
 
                 st.markdown("---")
-
-                # 2. TABEL PERSENTASE
-                st.subheader("📈 Monitor Perubahan Harga (%)")
-                st.dataframe(df_all_pct, use_container_width=True)
-
-                # 3. TABEL HARGA IDR
-                st.subheader("💰 Monitor Harga Penutupan (IDR)")
+                st.subheader("📈 Monitor Persentase & Dominasi")
+                st.dataframe(df_all_pct.style.applymap(style_control, subset=['Vol Control (%)']), use_container_width=True)
+                
+                st.subheader("💰 Monitor Harga IDR")
                 st.dataframe(df_all_prc, use_container_width=True)
-            else:
-                st.error("Gagal menarik data. Coba kurangi jumlah saham atau rentang tanggal.")
+            else: st.error("Koneksi gagal.")
