@@ -24,26 +24,39 @@ def load_data_auto():
             except: continue
     return None, None
 
-df_emiten, nama_file_aktif = load_data_auto()
+df_emiten, _ = load_data_auto()
 
-# --- 3. FUNGSI WARNA & STYLE ---
+# --- 3. FUNGSI PEWARNAAN ---
+
+# Warna untuk Kolom Volume Control
 def style_control(val):
     try:
-        num = float(val.replace('%', ''))
+        num = float(val.replace('%', '').replace(',', '.'))
         if num > 75: return 'background-color: #ff4b4b; color: white; font-weight: bold' # Ultra Control
         if num > 50: return 'background-color: #ffa500; color: black' # Strong Control
     except: pass
     return ''
 
-# --- 4. LOGIKA ANALISA & VOLUME CONTROL ---
+# Warna untuk Kolom Persentase Harga
+def style_percentage(val):
+    try:
+        if isinstance(val, str):
+            clean_val = val.replace('%', '').replace(',', '.')
+            num_val = float(clean_val)
+        else: num_val = float(val)
+        
+        if num_val > 0: return 'background-color: rgba(144, 238, 144, 0.4)' # Hijau Muda
+        elif num_val < 0: return 'background-color: rgba(255, 182, 193, 0.4)' # Merah Muda
+        elif num_val == 0: return 'background-color: rgba(255, 255, 0, 0.3)' # Kuning
+    except: pass
+    return ''
+
+# --- 4. LOGIKA ANALISA ---
 def get_signals_and_data(df_c, df_v):
-    results = []
-    shortlist_keys = []
-    
+    results, shortlist_keys = [], []
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
         if len(c) < 5: continue
-        
         chg_today = (c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]
         chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
         v_sma5 = v.rolling(5).mean().iloc[-1]
@@ -51,15 +64,13 @@ def get_signals_and_data(df_c, df_v):
         v_ratio = v_last / v_sma5 if v_sma5 > 0 else 0
         ticker = col.replace('.JK','')
         
-        # Teori Volume Control: Persentase dominasi volume hari ini terhadap rata-rata
-        # Kita gunakan rasio pertumbuhan volume sebagai proksi 'Control'
+        # Proksi Volume Control
         vol_control_pct = (v_ratio / (v_ratio + 1)) * 100 
         
         status = "Normal"
         if abs(chg_5d) < 0.02 and v_ratio >= 1.5:
             status = f"💎 Akumulasi (V:{v_ratio:.1f})"
-            if abs(chg_today) <= 0.01:
-                shortlist_keys.append(ticker)
+            if abs(chg_today) <= 0.01: shortlist_keys.append(ticker)
         elif chg_5d > 0.05 and v_ratio > 1.0:
             status = f"🚀 Markup (V:{v_ratio:.1f})"
             
@@ -69,64 +80,59 @@ def get_signals_and_data(df_c, df_v):
             'Vol Control (%)': f"{vol_control_pct:.1f}%",
             'Total Lot': f"{int(v_last/100):,}"
         })
-        
     return pd.DataFrame(results), shortlist_keys
 
-# --- 5. SIDEBAR & RENDER ---
+# --- 5. RENDER & LOGIKA DASHBOARD ---
 if df_emiten is not None:
     st.sidebar.header("Filter")
     selected_tickers = st.sidebar.multiselect("Cari Kode:", options=sorted(df_emiten['Kode Saham'].dropna().unique().tolist()))
     min_p = st.sidebar.number_input("Harga Min", value=100)
     max_p = st.sidebar.number_input("Harga Max", value=300)
-    
-    today = date.today()
-    start_d = st.sidebar.date_input("Mulai", today - timedelta(days=20))
-    end_d = st.sidebar.date_input("Akhir", today)
+    start_d = st.sidebar.date_input("Mulai", date.today() - timedelta(days=20))
+    end_d = st.sidebar.date_input("Akhir", date.today())
 
     if st.sidebar.button("🚀 Jalankan Analisa Ultra"):
-        with st.spinner('Menganalisa Dominasi Smart Money...'):
-            df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
-            tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].dropna().unique()]
-            
-            df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
-            
-            if not df_c_raw.empty:
-                df_c, df_v = df_c_raw.ffill(), df_v_raw.fillna(0)
-                last_p = df_c.iloc[-1]
-                saham_lolos = df_c.columns if selected_tickers else last_p[(last_p >= min_p) & (last_p <= max_p)].index
-                
-                df_f_c, df_f_v = df_c[saham_lolos], df_v[saham_lolos]
-                df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v)
+        df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
+        tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].dropna().unique()]
+        df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
+        
+        if not df_c_raw.empty:
+            df_c, df_v = df_c_raw.ffill(), df_v_raw.fillna(0)
+            last_p = df_c.iloc[-1]
+            saham_lolos = df_c.columns if selected_tickers else last_p[(last_p >= min_p) & (last_p <= max_p)].index
+            df_f_c, df_f_v = df_c[saham_lolos], df_v[saham_lolos]
+            df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v)
 
-                def prepare_display(df_data, is_pct=True):
-                    if is_pct:
-                        df_f = (df_data.pct_change() * 100).applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "0%")
-                    else:
-                        df_f = df_data.applymap(lambda x: int(x) if pd.notnull(x) else 0)
-                    df_f.index = df_f.index.strftime('%d/%m/%Y')
-                    df_t = df_f.T
-                    df_t.index = df_t.index.str.replace('.JK', '', regex=False)
-                    m = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_t, left_on='Kode Saham', right_index=True)
-                    f = pd.merge(m, df_analysis, on='Kode Saham', how='left')
-                    # Susun kolom agar Vol Control terlihat jelas di depan
-                    cols = list(f.columns)
-                    return f[[cols[0], cols[1], cols[-3], cols[-2], cols[-1]] + cols[2:-3]]
-
-                df_all_pct = prepare_display(df_f_c, is_pct=True)
-                df_all_prc = prepare_display(df_f_c, is_pct=False)
-                df_top = df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)]
-
-                # RENDER TAMPILAN
-                st.subheader("🎯 Shortlist: Akumulasi & High Control")
-                if not df_top.empty:
-                    st.dataframe(df_top.style.applymap(style_control, subset=['Vol Control (%)']), use_container_width=True)
+            def prepare_display(df_data, is_pct=True):
+                if is_pct:
+                    df_f = (df_data.pct_change() * 100).applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "0.0%")
                 else:
-                    st.warning("Tidak ada saham dengan kriteria Ultra Control.")
+                    df_f = df_data.applymap(lambda x: int(x) if pd.notnull(x) else 0)
+                df_f.index = df_f.index.strftime('%d/%m/%Y')
+                df_t = df_f.T
+                df_t.index = df_t.index.str.replace('.JK', '', regex=False)
+                m = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_t, left_on='Kode Saham', right_index=True)
+                f = pd.merge(m, df_analysis, on='Kode Saham', how='left')
+                cols = list(f.columns)
+                # Urutan: Kode, Nama, Analisa, Vol Control, Total Lot, Histori...
+                return f[[cols[0], cols[1], cols[-3], cols[-2], cols[-1]] + cols[2:-3]]
 
-                st.markdown("---")
-                st.subheader("📈 Monitor Persentase & Dominasi")
-                st.dataframe(df_all_pct.style.applymap(style_control, subset=['Vol Control (%)']), use_container_width=True)
-                
-                st.subheader("💰 Monitor Harga IDR")
-                st.dataframe(df_all_prc, use_container_width=True)
-            else: st.error("Koneksi gagal.")
+            df_all_pct = prepare_display(df_f_c, is_pct=True)
+            df_all_prc = prepare_display(df_f_c, is_pct=False)
+            df_top = df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)]
+
+            # APLIKASI STYLE GANDA
+            def apply_all_styles(df):
+                # subset untuk tanggal mulai dari kolom ke-6 (index 5)
+                return df.style.applymap(style_control, subset=['Vol Control (%)']) \
+                               .applymap(style_percentage, subset=df.columns[5:])
+
+            st.subheader("🎯 Shortlist: Akumulasi & High Control")
+            if not df_top.empty: st.dataframe(apply_all_styles(df_top), use_container_width=True)
+            
+            st.markdown("---")
+            st.subheader("📈 Monitor Persentase & Dominasi")
+            st.dataframe(apply_all_styles(df_all_pct), use_container_width=True)
+            
+            st.subheader("💰 Monitor Harga IDR")
+            st.dataframe(df_all_prc, use_container_width=True)
