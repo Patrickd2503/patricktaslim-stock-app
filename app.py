@@ -158,7 +158,23 @@ def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
         })
     return pd.DataFrame(results), shortlist_keys
 
-# --- 6. RENDER DASHBOARD ---
+# --- 6. PREPARE DISPLAY ---
+def prepare_display(df_data, df_analysis, is_pct=True, start_d=None):
+    df_view = df_data.loc[pd.to_datetime(start_d):]  # sesuai periode user
+    if is_pct:
+        df_f = (df_view.pct_change() * 100).applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "0.0%")
+    else:
+        df_f = df_view.applymap(lambda x: int(x) if pd.notnull(x) else 0)
+
+    df_f.index = df_f.index.strftime('%d/%m/%Y')
+    df_t = df_f.T
+    df_t.index = df_t.index.str.replace('.JK', '', regex=False)
+    m = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_t, left_on='Kode Saham', right_index=True)
+    m = pd.merge(m, df_analysis, on='Kode Saham', how='left')
+    cols = list(m.columns)
+    return m[[cols[0], cols[1], cols[-5], cols[-4], cols[-3], cols[-2], cols[-1]] + cols[2:-5]]
+
+# --- 7. RENDER DASHBOARD ---
 if df_emiten is not None:
     st.sidebar.header("Filter & Parameter")
     selected_tickers = st.sidebar.multiselect("Cari Kode:", options=sorted(df_emiten['Kode Saham'].dropna().unique().tolist()))
@@ -169,26 +185,4 @@ if df_emiten is not None:
 
     st.sidebar.markdown("---")
     btn_split = st.sidebar.button("📊 1. Split View (All Data)")
-    btn_analisa = st.sidebar.button("🚀 2. Jalankan Analisa Lengkap")
-
-    if btn_split or btn_analisa:
-        with st.spinner('Memproses data bursa...'):
-            df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
-            tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].dropna().unique()]
-            df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
-
-            if not df_c_raw.empty:
-                df_c, df_v = df_c_raw.ffill(), df_v_raw.fillna(0)
-                last_p = df_c.iloc[-1]
-                saham_lolos = df_c.columns if selected_tickers else last_p[(last_p >= min_p) & (last_p <= max_p)].index
-                df_f_c, df_f_v = df_c[saham_lolos], df_v[saham_lolos]
-
-                df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v, is_analisa_lengkap=btn_analisa)
-
-                if btn_split:
-                    st.success("Mode Split View Berhasil.")
-                    st.dataframe(df_analysis, use_container_width=True)
-
-                elif btn_analisa:
-                    df_top = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)]
-                    st.success
+    btn_analisa
