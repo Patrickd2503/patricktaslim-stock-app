@@ -5,10 +5,11 @@ from datetime import date, timedelta
 import os
 from io import BytesIO
 
+# --- CONFIG ---
 st.set_page_config(page_title="Monitor Saham BEI Ultra v3", layout="wide")
 st.title("🎯 Dashboard Akumulasi & MA Screener v3")
 
-# --- 1. FITUR CACHE ---
+# --- 1. CACHE DATA ---
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
     extended_start = start_date - timedelta(days=100)  # untuk akurasi MA50
@@ -21,8 +22,10 @@ def get_free_float(ticker_jk):
         info = yf.Ticker(ticker_jk).info
         f_shares = info.get('floatShares')
         total_s = info.get('sharesOutstanding')
-        if f_shares and total_s: return (f_shares / total_s) * 100
-    except: pass
+        if f_shares and total_s:
+            return (f_shares / total_s) * 100
+    except:
+        pass
     return None
 
 # --- 2. LOAD DATA ---
@@ -30,8 +33,10 @@ def load_data_auto():
     POSSIBLE_FILES = ['Kode Saham.xlsx - Sheet1.csv', 'Kode Saham.xlsx', 'Kode_Saham.xlsx']
     for file_name in POSSIBLE_FILES:
         if os.path.exists(file_name):
-            try: return (pd.read_csv(file_name) if file_name.endswith('.csv') else pd.read_excel(file_name)), file_name
-            except: continue
+            try:
+                return (pd.read_csv(file_name) if file_name.endswith('.csv') else pd.read_excel(file_name)), file_name
+            except:
+                continue
     return None, None
 
 df_emiten, _ = load_data_auto()
@@ -40,25 +45,34 @@ df_emiten, _ = load_data_auto()
 def style_control(val):
     try:
         num = float(str(val).replace('%', '').replace(',', '.'))
-        if num > 70: return 'background-color: #ff4b4b; color: white; font-weight: bold'
-        if num > 50: return 'background-color: #ffa500; color: black'
-    except: pass
+        if num > 70:
+            return 'background-color: #ff4b4b; color: white; font-weight: bold'
+        if num > 50:
+            return 'background-color: #ffa500; color: black'
+    except:
+        pass
     return ''
 
 def style_float(val):
     try:
         num = float(str(val).replace('%', '').replace(',', '.'))
-        if num < 40: return 'color: #008000; font-weight: bold'
-    except: pass
+        if num < 40:
+            return 'color: #008000; font-weight: bold'
+    except:
+        pass
     return ''
 
 def style_percentage(val):
     try:
         num_val = float(str(val).replace('%', '').replace(',', '.'))
-        if num_val > 0: return 'background-color: rgba(144, 238, 144, 0.4)'
-        elif num_val < 0: return 'background-color: rgba(255, 182, 193, 0.4)'
-        elif num_val == 0: return 'background-color: rgba(255, 255, 0, 0.3)'
-    except: pass
+        if num_val > 0:
+            return 'background-color: rgba(144, 238, 144, 0.4)'
+        elif num_val < 0:
+            return 'background-color: rgba(255, 182, 193, 0.4)'
+        elif num_val == 0:
+            return 'background-color: rgba(255, 255, 0, 0.3)'
+    except:
+        pass
     return ''
 
 # --- 4. EXPORT ---
@@ -76,7 +90,8 @@ def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
     results, shortlist_keys = [], []
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
-        if len(c) < 50: continue
+        if len(c) < 50:
+            continue
 
         # Moving averages
         ma5 = c.rolling(5).mean().iloc[-1]
@@ -90,7 +105,7 @@ def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
 
         chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
         price = c.iloc[-1]
-        ticker = col.replace('.JK','')
+        ticker = col.replace('.JK', '')
 
         vol_control_pct = (v_ratio / (v_ratio + 1)) * 100
         ff_pct = None
@@ -98,6 +113,7 @@ def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
 
         if is_analisa_lengkap:
             ff_pct = get_free_float(col)
+
             # --- Smart Money Rules ---
             is_sideways = abs(chg_5d) < 0.02
             is_high_control = vol_control_pct > 70
@@ -114,8 +130,10 @@ def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
             rule_ff = is_low_float
             rule_ma5_vs_ma20 = ma5 < ma20
 
-            gemini_pass = all([rule_price, rule_vol, rule_ma20, rule_ma50a,
-                               rule_ma50b, rule_vol_ma, rule_ff, rule_ma5_vs_ma20])
+            gemini_pass = all([
+                rule_price, rule_vol, rule_ma20, rule_ma50a,
+                rule_ma50b, rule_vol_ma, rule_ff, rule_ma5_vs_ma20
+            ])
 
             if is_sideways and v_ratio >= 1.2:
                 status = f"💎 Akumulasi (V:{v_ratio:.1f})"
@@ -172,4 +190,5 @@ if df_emiten is not None:
                     st.dataframe(df_analysis, use_container_width=True)
 
                 elif btn_analisa:
-                    df_top = df_analysis[df_analysis['Kode Saham'].isin(shortlist
+                    df_top = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)]
+                    st.success
