@@ -12,10 +12,11 @@ st.title("🎯 Smart Money + Broker Summary (Real-Time EOD)")
 # --- 1. INTEGRASI LIBRARY BROKER SUMMARY (NOMOR 1) ---
 def get_broker_data_real(ticker, analysis_date):
     """
-    Placeholder untuk library Broxum.
+    Fungsi placeholder untuk menghubungkan ke library/API Broker Summary.
     """
     try:
         # Hubungkan ke library Broxum pilihan Anda di sini
+        # Contoh return sementara (Simulasi)
         return "AK", "Accum" 
     except:
         return "-", "No Data"
@@ -23,6 +24,7 @@ def get_broker_data_real(ticker, analysis_date):
 # --- 2. CACHE DATA ---
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
+    # Buffer 100 hari untuk kalkulasi MA yang akurat
     extended_start = start_date - timedelta(days=100)
     df = yf.download(tickers, start=extended_start, end=end_date, threads=True, progress=False)
     return df['Close'], df['Volume']
@@ -37,9 +39,8 @@ def get_free_float(ticker_jk):
     except: pass
     return None
 
-# --- 3. FUNGSI LOAD DATA (PERBAIKAN NAME ERROR) ---
+# --- 3. FUNGSI LOAD DATA ---
 def load_data_auto():
-    # List nama file yang mungkin diupload user
     POSSIBLE_FILES = ['Kode Saham.xlsx - Sheet1.csv', 'Kode Saham.xlsx', 'Kode_Saham.xlsx']
     for file_name in POSSIBLE_FILES:
         if os.path.exists(file_name):
@@ -65,14 +66,14 @@ def style_control(val):
     except: pass
     return ''
 
-# --- 5. LOGIKA ANALISA v5 ---
+# --- 5. LOGIKA ANALISA v5 (REFINED) ---
 def get_signals_and_data(df_c, df_v, analysis_date, is_analisa_lengkap=False):
     results, shortlist_keys = [], []
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
         if len(c) < 50: continue
 
-        # Kalkulasi (Invisible)
+        # Kalkulasi Indikator (MA tetap dihitung secara internal)
         ma20 = c.rolling(20).mean().iloc[-1]
         ma50 = c.rolling(50).mean().iloc[-1]
         v_sma5 = v.rolling(5).mean().iloc[-1]
@@ -86,14 +87,16 @@ def get_signals_and_data(df_c, df_v, analysis_date, is_analisa_lengkap=False):
         status_sm, status_bx, top_buyer = "Normal", "-", "-"
         
         if is_analisa_lengkap:
+            # Tarik data Broker
             top_buyer, status_bx = get_broker_data_real(ticker, analysis_date)
-            # Kriteria Dilonggarkan
-            is_sideways = abs(chg_5d) < 0.04
-            is_price_near_ma = price <= 1.05 * ma20
+            
+            # Kriteria Longgar (Double Confirmation)
+            is_sideways = abs(chg_5d) < 0.04 
+            is_near_ma20 = price <= 1.05 * ma20
             
             if is_sideways and v_ratio >= 1.05:
-                status_sm = f"💎 Akumulasi (V:{v_ratio:.1f})"
-                if vol_control_pct > 55 and status_bx in ['Accum', 'Big Accum'] and is_price_near_ma:
+                status_sm = f"💎 Akum (V:{v_ratio:.1f})"
+                if vol_control_pct > 55 and status_bx in ['Accum', 'Big Accum'] and is_near_ma20:
                     shortlist_keys.append(ticker)
             elif chg_5d > 0.05: status_sm = "🚀 Markup"
 
@@ -113,41 +116,74 @@ def get_signals_and_data(df_c, df_v, analysis_date, is_analisa_lengkap=False):
 df_emiten, _ = load_data_auto()
 
 if df_emiten is not None:
+    # --- SIDEBAR LENGKAP ---
     st.sidebar.header("Filter & Parameter")
+    
+    # Pencarian Kode
+    selected_tickers = st.sidebar.multiselect(
+        "Cari Kode:", 
+        options=sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
+    )
+    
+    # Filter Range Harga
+    min_p = st.sidebar.number_input("Harga Min", value=100)
+    max_p = st.sidebar.number_input("Harga Max", value=5000)
+    
+    # Range Tanggal
     start_d = st.sidebar.date_input("Mulai", date(2025, 12, 1))
     end_d = st.sidebar.date_input("Akhir", date(2026, 1, 5))
-    btn_analisa = st.sidebar.button("🚀 Jalankan Analisa Smart Broxum")
 
-    if btn_analisa:
-        with st.spinner('Menarik data histori & Broker Summary...'):
-            tickers_jk = [str(k).strip() + ".JK" for k in df_emiten['Kode Saham'].dropna().unique()]
+    st.sidebar.markdown("---")
+    
+    # Tombol Kontrol
+    btn_split = st.sidebar.button("📊 1. Split View (Data Histori)")
+    btn_analisa = st.sidebar.button("🚀 2. Jalankan Analisa Smart Broxum")
+
+    if btn_split or btn_analisa:
+        with st.spinner('Memproses data...'):
+            # Filter Emiten
+            df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
+            tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].dropna().unique()]
+            
             df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
 
             if not df_c_raw.empty:
-                df_analysis, shortlist_keys = get_signals_and_data(df_c_raw.ffill(), df_v_raw.fillna(0), end_d, True)
+                df_c = df_c_raw.ffill()
+                last_p = df_c.iloc[-1]
                 
-                # Tampilan Harian
-                df_view = df_c_raw.ffill().loc[pd.to_datetime(start_d):]
+                # Filter berdasarkan range harga di sidebar
+                saham_lolos = df_c.columns if selected_tickers else last_p[(last_p >= min_p) & (last_p <= max_p)].index
+                df_f_c, df_f_v = df_c[saham_lolos], df_v_raw[saham_lolos]
+                
+                # Jalankan Analisa
+                df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v, end_d, is_analisa_lengkap=btn_analisa)
+                
+                # Menyiapkan Tampilan Harian (Transpose)
+                df_view = df_f_c.loc[pd.to_datetime(start_d):]
                 df_pct = (df_view.pct_change() * 100).applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "0.0%")
                 df_pct.index = df_pct.index.strftime('%d/%m/%Y')
                 df_harian = df_pct.T
                 df_harian.index = df_harian.index.str.replace('.JK', '')
                 
-                df_final = pd.merge(df_analysis, df_harian, left_on='Kode Saham', right_index=True)
-                
-                st.subheader("🎯 Shortlist: Double Confirmation")
-                df_top = df_final[df_final['Kode Saham'].isin(shortlist_keys)]
-                if not df_top.empty:
-                    st.dataframe(df_top.style.applymap(style_control, subset=['Vol Control (%)'])
-                                          .applymap(style_percentage, subset=df_top.columns[8:]), use_container_width=True)
-                else:
-                    st.warning("Belum ada shortlist. Menampilkan semua data.")
+                # Merge Data Analisa dengan Nama Perusahaan & Histori Harian
+                df_merged = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_analysis, on='Kode Saham')
+                df_final = pd.merge(df_merged, df_harian, left_on='Kode Saham', right_index=True)
 
-                st.divider()
-                st.subheader("📊 Semua Data Analisa")
+                # RENDER TABEL SHORTLIST
+                if btn_analisa:
+                    st.subheader("🎯 Shortlist Terpilih (SM + Broxum)")
+                    df_top = df_final[df_final['Kode Saham'].isin(shortlist_keys)]
+                    if not df_top.empty:
+                        st.dataframe(df_top.style.applymap(style_control, subset=['Vol Control (%)'])
+                                              .applymap(style_percentage, subset=df_top.columns[10:]), use_container_width=True)
+                    else:
+                        st.warning("Tidak ada saham yang masuk kriteria shortlist saat ini.")
+
+                # RENDER SEMUA DATA
+                st.subheader("📊 Semua Data Pantauan")
                 st.dataframe(df_final.style.applymap(style_control, subset=['Vol Control (%)'])
-                                          .applymap(style_percentage, subset=df_final.columns[8:]), use_container_width=True)
+                                          .applymap(style_percentage, subset=df_final.columns[10:]), use_container_width=True)
             else:
-                st.error("Data tidak ditemukan di Yahoo Finance.")
+                st.error("Koneksi gagal atau data tidak ditemukan.")
 else:
-    st.error("File 'Kode Saham.xlsx' tidak ditemukan di direktori app.")
+    st.error("File 'Kode Saham.xlsx' belum ditemukan. Silakan pastikan file ada di repositori.")
