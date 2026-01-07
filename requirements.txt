@@ -4,3 +4,4 @@ pandas
 pandas_ta
 openpyxl
 xlsxwriter
+matplotlib
