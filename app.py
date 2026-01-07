@@ -7,11 +7,10 @@ import os
 # --- CONFIG DASHBOARD ---
 st.set_page_config(page_title="Strategic Top 5 Screener", layout="wide")
 st.title("🏆 Strategic Moving Average: Top 5 Selection")
-st.markdown("Screener ini menyaring saham berdasarkan parameter MA & Free Float, lalu memberikan **Ranking 5 Terbaik**.")
+st.markdown("Screener ini menyaring saham berdasarkan parameter MA & Free Float, lalu mencari **Highest Profit** dalam 30 hari.")
 
 # --- 1. FUNGSI FETCH DATA HARGA ---
 def fetch_stock_data(tickers, start_analisa, end_analisa):
-    # Buffer 150 hari agar perhitungan MA50 akurat
     ext_start = start_analisa - timedelta(days=150) 
     backtest_end = end_analisa + timedelta(days=45) 
     try:
@@ -28,7 +27,14 @@ def fetch_stock_data(tickers, start_analisa, end_analisa):
     except Exception:
         return pd.DataFrame()
 
-# --- 2. LOGIKA ANALISA PARAMETER KHUSUS & RANKING ---
+# --- 2. UTIL: FORMAT TANGGAL ---
+def format_id_date(ts):
+    if pd.isna(ts): return "-"
+    bulan = {1:"Jan", 2:"Feb", 3:"Mar", 4:"Apr", 5:"Mei", 6:"Jun", 
+             7:"Jul", 8:"Agu", 9:"Sep", 10:"Okt", 11:"Nov", 12:"Des"}
+    return f"{ts.day} {bulan[ts.month]} {ts.year}"
+
+# --- 3. LOGIKA ANALISA PARAMETER KHUSUS & RANKING ---
 def run_custom_analysis(df_full, tickers, end_analisa, min_price_input, max_price_input):
     results = []
     end_analisa_ts = pd.Timestamp(end_analisa)
@@ -49,7 +55,7 @@ def run_custom_analysis(df_full, tickers, end_analisa, min_price_input, max_pric
             # --- DATA TEKNIKAL ---
             price = float(df_analisa['Close'].iloc[-1])
             
-            # Filter Harga dari Sidebar + Aturan Wajib Price > 50
+            # Filter Harga dari Sidebar + Rules Wajib
             if not (min_price_input <= price <= max_price_input and price > 50):
                 continue
 
@@ -75,22 +81,28 @@ def run_custom_analysis(df_full, tickers, end_analisa, min_price_input, max_pric
             r7 = free_float_pct < 40
 
             if all([r2, r3, r4, r5, r6, r7]):
-                # Backtest (High Price dalam 30 hari ke depan)
+                # BACKTEST: Mencari Tanggal Tertinggi dalam 30 Hari
                 future_rows = saham_data.loc[(saham_data.index > end_analisa_ts) & (saham_data.index <= limit_date_ts)]
+                
                 peak_pct = 0
+                peak_date = None
+                
                 if not future_rows.empty:
-                    peak_pct = ((future_rows['High'].max() - price) / price) * 100
+                    # Ambil harga tertinggi (High) dan tanggalnya
+                    idx_max = future_rows['High'].idxmax()
+                    peak_price = future_rows.loc[idx_max, 'High']
+                    peak_pct = ((peak_price - price) / price) * 100
+                    peak_date = idx_max
 
                 vol_ratio = vol / vol_ma5
                 results.append({
                     'Ticker': ticker.replace('.JK',''),
-                    'Score': vol_ratio, # Ranking berdasarkan ledakan volume
+                    'Score': vol_ratio, 
                     'Price': round(price, 0),
                     'Vol Ratio': round(vol_ratio, 2),
-                    'Free Float (%)': round(free_float_pct, 2),
-                    'MA20': round(ma20, 2),
-                    'MA50': round(ma50, 2),
+                    'Free Float (%)': round(free_float_pct, 1),
                     'Max Move (30D)': f"{peak_pct:.2f}%",
+                    'Peak Date': format_id_date(peak_date),
                     'Result': "Success" if peak_pct >= 10 else "Fail"
                 })
         except: continue
@@ -98,7 +110,7 @@ def run_custom_analysis(df_full, tickers, end_analisa, min_price_input, max_pric
     df_res = pd.DataFrame(results)
     return df_res.sort_values('Score', ascending=False) if not df_res.empty else df_res
 
-# --- 3. UI & MAIN ---
+# --- 4. UI & MAIN ---
 def load_emiten():
     for f in ['Kode Saham.xlsx', 'Kode_Saham.xlsx', 'Kode Saham.csv']:
         if os.path.exists(f):
@@ -123,13 +135,14 @@ if df_emiten is not None:
 
     if btn:
         all_tickers = [str(t).strip() + ".JK" for t in df_emiten['Kode Saham']]
-        with st.spinner("Memproses filter teknikal & Free Float..."):
+        with st.spinner("Mengevaluasi parameter teknikal & Peak Profit..."):
             df_raw = fetch_stock_data(all_tickers, start_d, end_d)
             df_res = run_custom_analysis(df_raw, all_tickers, end_d, min_p, max_p)
             
             if not df_res.empty:
-                st.subheader("🏆 The Golden 5 (High Conviction)")
+                st.subheader("🏆 The Golden 5 (High Vol Spike)")
                 top_5 = df_res.head(5)
+                # Tampilkan tabel tanpa kolom Score
                 st.dataframe(top_5.drop(columns=['Score']), use_container_width=True, hide_index=True)
                 
                 wr_5 = (len(top_5[top_5['Result'] == "Success"]) / len(top_5)) * 100
@@ -139,6 +152,6 @@ if df_emiten is not None:
                 with st.expander("Lihat Semua Saham Lolos Filter"):
                     st.dataframe(df_res.drop(columns=['Score']), use_container_width=True, hide_index=True)
             else:
-                st.warning("Tidak ada saham yang memenuhi kriteria di rentang harga tersebut.")
+                st.warning("Tidak ada saham yang memenuhi kriteria pada tanggal tersebut.")
 else:
     st.error("File 'Kode Saham.xlsx' tidak ditemukan.")
