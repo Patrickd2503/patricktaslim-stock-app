@@ -6,16 +6,17 @@ from datetime import date, timedelta
 import os
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Top Pick & Backtest Precision", layout="wide")
-st.title("💎 Momentum Screener + High Precision Backtest")
+st.set_page_config(page_title="Top Pick Precision Monitor", layout="wide")
+st.title("💎 Momentum Screener & Accurate Backtest")
 
-# --- 1. FUNGSI FETCH HARGA AWAL (QUICK FILTER) ---
+# --- 1. FUNGSI FETCH HARGA AWAL ---
 def get_current_prices(tickers, target_date):
     try:
-        data = yf.download(tickers, start=target_date - timedelta(days=5), end=target_date + timedelta(days=1), threads=True, progress=False)
+        # Menggunakan auto_adjust=True agar data konsisten dengan aksi korporasi
+        data = yf.download(tickers, start=target_date - timedelta(days=5), 
+                           end=target_date + timedelta(days=1), 
+                           auto_adjust=True, threads=True, progress=False)
         if data.empty: return pd.Series()
-        if isinstance(data.columns, pd.MultiIndex):
-            return data['Close'].ffill().iloc[-1]
         return data['Close'].ffill().iloc[-1]
     except:
         return pd.Series()
@@ -24,14 +25,16 @@ def get_current_prices(tickers, target_date):
 @st.cache_data(ttl=3600)
 def fetch_full_data(tickers, start_analisa, end_analisa):
     ext_start = start_analisa - timedelta(days=365)
-    backtest_end = end_analisa + timedelta(days=50) # Buffer untuk pastikan dapet 30 hari bursa
+    backtest_end = end_analisa + timedelta(days=50) 
     try:
-        df = yf.download(list(tickers), start=ext_start, end=backtest_end, threads=True, progress=False)
+        # auto_adjust=True sangat penting untuk menghindari lonjakan persentase fiktif
+        df = yf.download(list(tickers), start=ext_start, end=backtest_end, 
+                         auto_adjust=True, threads=True, progress=False)
         return df
     except:
         return pd.DataFrame()
 
-# --- 3. LOGIKA ANALISA & BACKTEST TARGET ---
+# --- 3. LOGIKA ANALISA & BACKTEST ---
 def run_analysis_and_backtest(df_full, tickers, end_analisa):
     results = []
     end_analisa_ts = pd.Timestamp(end_analisa)
@@ -45,7 +48,6 @@ def run_analysis_and_backtest(df_full, tickers, end_analisa):
 
             if saham_data.empty: continue
 
-            # Data Analisa & Data Forward (30 hari bursa setelahnya)
             df_analisa = saham_data.loc[:end_analisa_ts]
             df_backtest = saham_data.loc[end_analisa_ts:].iloc[1:31] 
 
@@ -66,30 +68,28 @@ def run_analysis_and_backtest(df_full, tickers, end_analisa):
             is_top = (55 < rsi < 72) and (macd_h > 0) and (price_buy > ma20) and (v_ratio > 2.5) and (turnover > 2_000_000_000)
             status = "💎 TOP PICK" if is_top else "Watchlist"
 
-            # --- LOGIKA BACKTEST BARU ---
-            # Hitung profit harian berdasarkan harga HIGH di masa depan
+            # --- LOGIKA BACKTEST (DENGAN PENGECEKAN ARA) ---
+            # Hitung profit berdasarkan harga tertinggi di masa depan
             df_backtest['Daily_Profit_Pct'] = ((df_backtest['High'] - price_buy) / price_buy) * 100
             
-            # Cari kenaikan tertinggi
+            # Mendapatkan data hari dengan profit tertinggi
             max_profit = df_backtest['Daily_Profit_Pct'].max()
-            
-            # Cari tanggal saat kenaikan tertinggi itu terjadi
-            # idxmax() akan mengembalikan index (tanggal) dari nilai tertinggi
             date_max_profit = df_backtest['Daily_Profit_Pct'].idxmax()
             
             backtest_res = "Success" if max_profit >= 10 else "Fail"
             
-            # Format tanggal untuk tampilan (YYYY-MM-DD)
+            # Format tampilan
             display_date = date_max_profit.strftime('%Y-%m-%d') if max_profit >= 10 else "-"
+            # Persentase yang ditampilkan sekarang menggunakan data yang sudah di-adjust
             display_pct = f"{max_profit:.2f}%"
 
             results.append({
                 'Kode Saham': ticker.replace('.JK',''),
                 'Status': status,
-                'Last Price': int(price_buy),
+                'Last Price': round(price_buy, 2),
                 'Backtest Result': backtest_res,
-                'Date': display_date,           # Kolom baru 1
-                'Percentage': display_pct,      # Kolom baru 2
+                'Date': display_date,
+                'Percentage': display_pct,
                 'Vol Ratio': round(v_ratio, 2),
                 'RSI (14)': round(rsi, 2),
                 'Turnover (M)': round(turnover / 1_000_000_000, 2)
@@ -119,33 +119,33 @@ if df_emiten is not None:
     max_p = st.sidebar.number_input("Harga Max", value=2000)
     
     st.sidebar.subheader("Periode Analisa")
-    start_d = st.sidebar.date_input("Mulai", date(2024, 10, 1))
-    end_d = st.sidebar.date_input("Akhir", date(2024, 10, 31))
+    start_d = st.sidebar.date_input("Mulai", date(2025, 5, 1))
+    end_d = st.sidebar.date_input("Akhir", date(2025, 5, 30))
 
     if st.sidebar.button("🚀 Jalankan Analisa & Backtest"):
         all_tickers = [str(t).strip() + ".JK" for t in df_emiten['Kode Saham']]
         
-        with st.spinner('Menyaring harga pasar...'):
+        with st.spinner('Menyaring harga pasar (Adjusted)...'):
             current_prices = get_current_prices(all_tickers, end_d)
             saham_lolos = current_prices[(current_prices >= min_p) & (current_prices <= max_p)].index.tolist()
             
         if saham_lolos:
-            st.info(f"Menganalisa {len(saham_lolos)} saham. Mencari profit puncak dalam 30 hari ke depan...")
-            with st.spinner('Memproses Data...'):
+            st.info(f"Menganalisa {len(saham_lolos)} saham. Mencari peak profit (Max 30 hari)...")
+            with st.spinner('Memproses Data histori yang disesuaikan...'):
                 df_full = fetch_full_data(saham_lolos, start_d, end_d)
                 if not df_full.empty:
                     df_res = run_analysis_and_backtest(df_full, saham_lolos, end_d)
                     
-                    st.subheader("🎯 Top Pick & Peak Profit Analysis")
+                    st.subheader("🎯 Top Pick & Accurate Peak Profit")
                     df_top = df_res[df_res['Status'] == "💎 TOP PICK"]
                     st.dataframe(df_top, use_container_width=True)
                     
                     if not df_top.empty:
                         win_rate = (len(df_top[df_top['Backtest Result'] == "Success"]) / len(df_top)) * 100
-                        st.metric("Win Rate Top Pick (Target 10%)", f"{win_rate:.1f}%")
+                        st.metric("Win Rate Top Pick (Accurate)", f"{win_rate:.1f}%")
 
                     st.divider()
-                    st.subheader("📊 Semua Hasil (Urut Vol Ratio)")
+                    st.subheader("📊 Semua Hasil (Data Adjusted)")
                     st.dataframe(df_res, use_container_width=True)
         else:
             st.warning("Tidak ada saham yang sesuai kriteria harga.")
