@@ -6,156 +6,146 @@ from datetime import date, timedelta
 import os
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Top Pick Momentum Monitor", layout="wide")
-st.title("💎 Top Pick Momentum Screener")
+st.set_page_config(page_title="Top Pick & Backtest Monitor", layout="wide")
+st.title("💎 Momentum Screener + Backtest")
 
-# --- 1. FUNGSI FETCH HARGA TERAKHIR (UNTUK FILTER AWAL) ---
-def get_current_prices(tickers):
+# --- 1. FUNGSI FETCH HARGA AWAL (QUICK FILTER) ---
+def get_current_prices(tickers, target_date):
     try:
-        data = yf.download(tickers, period="1d", threads=True, progress=False)
+        # Mengambil data pada tanggal akhir periode untuk filter harga
+        data = yf.download(tickers, start=target_date - timedelta(days=5), end=target_date + timedelta(days=1), threads=True, progress=False)
         if data.empty: return pd.Series()
-        # Mengambil harga Close terakhir
         if isinstance(data.columns, pd.MultiIndex):
-            return data['Close'].iloc[-1]
-        return data['Close']
+            return data['Close'].ffill().iloc[-1]
+        return data['Close'].ffill().iloc[-1]
     except:
         return pd.Series()
 
-# --- 2. FUNGSI FETCH DATA HISTORI (UNTUK ANALISA) ---
+# --- 2. FUNGSI FETCH DATA LENGKAP (HISTORI & BACKTEST) ---
 @st.cache_data(ttl=3600)
-def fetch_hist_data(tickers, start_date, end_date):
-    # Buffer data 1 tahun untuk akurasi indikator MACD & RSI
-    extended_start = start_date - timedelta(days=365)
+def fetch_full_data(tickers, start_analisa, end_analisa):
+    # Periode Analisa (Histori untuk indikator)
+    ext_start = start_analisa - timedelta(days=365)
+    # Periode Backtest (30 hari setelah end_analisa)
+    backtest_end = end_analisa + timedelta(days=45) # 45 hari kalender asumsikan ~30 hari bursa
+    
     try:
-        df = yf.download(list(tickers), start=extended_start, end=end_date, threads=True, progress=False)
-        if df.empty: return pd.DataFrame(), pd.DataFrame()
-        
-        if isinstance(df.columns, pd.MultiIndex):
-            return df['Close'], df['Volume']
-        return df[['Close']], df[['Volume']]
+        df = yf.download(list(tickers), start=ext_start, end=backtest_end, threads=True, progress=False)
+        if df.empty: return pd.DataFrame()
+        return df
     except:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame()
 
-# --- 3. LOGIKA ANALISA HIGH CONVICTION ---
-def get_signals(df_c, df_v):
-    results, shortlist_keys = [], []
-    if df_c.empty: return pd.DataFrame(), []
+# --- 3. LOGIKA ANALISA & BACKTEST ---
+def run_analysis_and_backtest(df_full, tickers, end_analisa):
+    results = []
+    
+    # Pastikan end_analisa ada dalam index
+    end_analisa_ts = pd.Timestamp(end_analisa)
+    
+    for ticker in tickers:
+        try:
+            # Ambil data spesifik saham
+            if isinstance(df_full.columns, pd.MultiIndex):
+                saham_data = df_full.xs(ticker, level=1, axis=1).dropna()
+            else:
+                saham_data = df_full.dropna() # Jika hanya 1 saham
 
-    for col in df_c.columns:
-        c = df_c[col].dropna()
-        v = df_v[col].dropna()
-        if len(c) < 35: continue 
-        
-        # Indikator
-        rsi = ta.rsi(c, length=14)
-        rsi_val = float(rsi.iloc[-1]) if rsi is not None and not rsi.empty else 50
-        
-        macd = ta.macd(c)
-        # Ambil histogram terakhir secara aman (float tunggal)
-        macd_h = float(macd.filter(like='MACDh').iloc[-1]) if macd is not None and not macd.empty else 0
-        
-        ma20 = c.rolling(20).mean().iloc[-1]
-        v_sma20 = v.rolling(20).mean().iloc[-1]
-        v_last = v.iloc[-1]
-        price_last = float(c.iloc[-1])
-        
-        v_ratio = float(v_last / v_sma20) if v_sma20 > 0 else 0
-        turnover = v_last * price_last
-        
-        # KRITERIA KETAT
-        is_strong_rsi = 55 < rsi_val < 70
-        is_bullish_macd = macd_h > 0
-        is_above_ma20 = price_last > ma20
-        is_ultra_vol = v_ratio > 2.5
-        is_liquid = turnover > 2_000_000_000 # Min Transaksi 2 Miliar
-        
-        ticker = str(col).replace('.JK','')
-        
-        if is_strong_rsi and is_bullish_macd and is_above_ma20 and is_ultra_vol and is_liquid:
-            status = "💎 TOP PICK"
-            shortlist_keys.append(ticker)
-        elif is_bullish_macd and is_above_ma20 and v_ratio > 1.2:
-            status = "⚡ Momentum"
-        else:
-            status = "Wait & See"
+            if saham_data.empty: continue
 
-        results.append({
-            'Kode Saham': ticker,
-            'Status': status,
-            'Last Price': int(price_last),
-            'Vol Ratio': round(v_ratio, 2),
-            'RSI (14)': round(rsi_val, 2),
-            'Turnover (M)': round(turnover / 1_000_000_000, 2),
-            'MA20 Dist (%)': round(((price_last - ma20) / ma20) * 100, 2)
-        })
-        
-    df_res = pd.DataFrame(results)
-    if not df_res.empty:
-        df_res = df_res.sort_values(by='Vol Ratio', ascending=False)
-    return df_res, shortlist_keys
+            # Potong data untuk Analisa (sampai end_analisa)
+            df_analisa = saham_data.loc[:end_analisa_ts]
+            # Potong data untuk Backtest (setelah end_analisa sampai 30 hari bursa)
+            df_backtest = saham_data.loc[end_analisa_ts:].iloc[1:31] # 30 baris setelah hari beli
+
+            if len(df_analisa) < 35 or df_backtest.empty: continue
+
+            # --- HITUNG INDIKATOR ---
+            c = df_analisa['Close']
+            v = df_analisa['Volume']
+            rsi = ta.rsi(c, length=14)
+            rsi_val = float(rsi.iloc[-1]) if rsi is not None else 50
+            macd = ta.macd(c)
+            macd_h = float(macd.filter(like='MACDh').iloc[-1]) if macd is not None else 0
+            ma20 = c.rolling(20).mean().iloc[-1]
+            v_ratio = float(v.iloc[-1] / v.rolling(20).mean().iloc[-1])
+            price_buy = float(c.iloc[-1]) # Harga beli (Harga penutupan hari terakhir periode)
+            turnover = v.iloc[-1] * price_buy
+
+            # --- KRITERIA TOP PICK ---
+            is_top = (55 < rsi_val < 72) and (macd_h > 0) and (price_buy > ma20) and (v_ratio > 2.5) and (turnover > 2_000_000_000)
+            status = "💎 TOP PICK" if is_top else "Watchlist"
+
+            # --- LOGIKA BACKTEST (10% Profit Target) ---
+            highest_after = df_backtest['High'].max()
+            profit_pct = ((highest_after - price_buy) / price_buy) * 100
+            backtest_res = "Success" if profit_pct >= 10 else "Fail"
+
+            results.append({
+                'Kode Saham': ticker.replace('.JK',''),
+                'Status': status,
+                'Last Price': int(price_buy),
+                'Backtest Result': backtest_res, # Posisi di sebelah kanan Last Price
+                'Max Rise (%)': round(profit_pct, 2),
+                'Vol Ratio': round(v_ratio, 2),
+                'RSI (14)': round(rsi_val, 2)
+            })
+        except:
+            continue
+            
+    df_final = pd.DataFrame(results)
+    if not df_final.empty:
+        df_final = df_final.sort_values(by='Vol Ratio', ascending=False)
+    return df_final
 
 # --- 4. MAIN APP ---
 def load_emiten():
     for f in ['Kode Saham.xlsx', 'Kode_Saham.xlsx', 'Kode Saham.csv']:
         if os.path.exists(f):
-            try:
-                df = pd.read_csv(f) if f.endswith('.csv') else pd.read_excel(f)
-                df.columns = [c.strip() for c in df.columns]
-                return df
-            except: continue
+            df = pd.read_csv(f) if f.endswith('.csv') else pd.read_excel(f)
+            df.columns = [c.strip() for c in df.columns]
+            return df
     return None
 
 df_emiten = load_emiten()
 
 if df_emiten is not None:
     st.sidebar.header("Filter Parameter")
-    all_codes = sorted(df_emiten['Kode Saham'].unique().tolist())
-    selected = st.sidebar.multiselect("Pantau Kode Spesifik:", options=all_codes)
-    
     min_p = st.sidebar.number_input("Harga Min", value=100)
-    max_p = st.sidebar.number_input("Harga Max", value=900)
+    max_p = st.sidebar.number_input("Harga Max", value=2000)
     
-    # --- INPUT PERIODE (DIMUNCULKAN KEMBALI) ---
-    st.sidebar.markdown("---")
     st.sidebar.subheader("Periode Analisa")
-    start_d = st.sidebar.date_input("Mulai", date.today() - timedelta(days=30))
-    end_d = st.sidebar.date_input("Akhir", date.today())
+    start_d = st.sidebar.date_input("Mulai", date(2024, 10, 1))
+    end_d = st.sidebar.date_input("Akhir", date(2024, 10, 31))
 
-    if st.sidebar.button("🚀 Jalankan Analisa"):
-        target_codes = selected if selected else df_emiten['Kode Saham'].tolist()
-        tickers_jk = [str(t).strip() + ".JK" for t in target_codes]
+    if st.sidebar.button("🚀 Jalankan Analisa & Backtest"):
+        all_tickers = [str(t).strip() + ".JK" for t in df_emiten['Kode Saham']]
         
-        with st.spinner('Menyaring harga...'):
-            current_prices = get_current_prices(tickers_jk)
-            # Saring saham yang harganya masuk rentang
+        with st.spinner('Memfilter harga...'):
+            current_prices = get_current_prices(all_tickers, end_d)
             saham_lolos = current_prices[(current_prices >= min_p) & (current_prices <= max_p)].index.tolist()
             
         if saham_lolos:
-            st.info(f"Ditemukan {len(saham_lolos)} saham dalam rentang harga. Memulai analisa momentum...")
-            with st.spinner('Menarik data histori & menghitung indikator...'):
-                c_raw, v_raw = fetch_hist_data(saham_lolos, start_d, end_d)
-                
-                if not c_raw.empty:
-                    # Penanganan jika hanya 1 saham yang lolos
-                    if len(saham_lolos) == 1:
-                        c_raw.columns = [saham_lolos[0]]
-                        v_raw.columns = [saham_lolos[0]]
-
-                    df_res, shortlists = get_signals(c_raw, v_raw)
+            st.info(f"Menganalisa {len(saham_lolos)} saham. Mengecek performa 30 hari ke depan...")
+            with st.spinner('Menghitung Backtest...'):
+                df_full = fetch_full_data(saham_lolos, start_d, end_d)
+                if not df_full.empty:
+                    df_res = run_analysis_and_backtest(df_full, saham_lolos, end_d)
                     
-                    st.subheader("🎯 Top Pick Terpilih")
+                    # Tampilan Shortlist
+                    st.subheader("🎯 Top Pick & Validasi Backtest")
                     df_top = df_res[df_res['Status'] == "💎 TOP PICK"]
+                    st.dataframe(df_top, use_container_width=True)
+                    
+                    # Statistik sederhana
                     if not df_top.empty:
-                        st.dataframe(df_top, use_container_width=True)
-                    else:
-                        st.info("Tidak ada saham yang memenuhi kriteria ultra ketat 'TOP PICK' saat ini.")
-                        
+                        win_rate = (len(df_top[df_top['Backtest Result'] == "Success"]) / len(df_top)) * 100
+                        st.metric("Win Rate Top Pick", f"{win_rate:.1f}%")
+
                     st.divider()
-                    st.subheader("📊 Hasil Screening Lengkap (Auto-Sort by Vol Ratio)")
+                    st.subheader("📊 Semua Hasil (Urut Vol Ratio)")
                     st.dataframe(df_res, use_container_width=True)
-                else:
-                    st.error("Gagal mengambil data histori. Pastikan periode tanggal valid.")
         else:
-            st.warning("Tidak ada saham yang ditemukan dalam rentang harga tersebut.")
+            st.warning("Tidak ada saham di rentang harga tersebut.")
 else:
-    st.error("File database 'Kode Saham.xlsx' tidak ditemukan.")
+    st.error("File database tidak ditemukan.")
