@@ -21,10 +21,10 @@ def get_current_prices(tickers, target_date):
             progress=False
         )
         if data.empty:
-            return pd.Series()
+            return pd.Series(dtype=float)
         return data['Close'].ffill().iloc[-1]
-    except:
-        return pd.Series()
+    except Exception:
+        return pd.Series(dtype=float)
 
 # --- 2. FUNGSI FETCH DATA LENGKAP ---
 def fetch_full_data(tickers, start_analisa, end_analisa):
@@ -40,7 +40,7 @@ def fetch_full_data(tickers, start_analisa, end_analisa):
             progress=False
         )
         return df
-    except:
+    except Exception:
         return pd.DataFrame()
 
 # --- 3. FORMAT TANGGAL INDONESIA ---
@@ -52,7 +52,17 @@ def format_id_date(ts):
     }
     return f"{ts.day} {bulan[ts.month]} {ts.year}"
 
-# --- 4. LOGIKA ANALISA & BACKTEST ---
+# --- 4. UTIL: BAND ARA BEI ---
+def ara_band(close_price):
+    # Aturan umum BEI (disederhanakan):
+    if close_price < 200:
+        return 35.0
+    elif close_price <= 5000:
+        return 25.0
+    else:
+        return 20.0
+
+# --- 5. LOGIKA ANALISA & BACKTEST (DAILY MOVE) ---
 def run_analysis_and_backtest(df_full, tickers, end_analisa):
     results = []
     end_analisa_ts = pd.Timestamp(end_analisa)
@@ -65,10 +75,10 @@ def run_analysis_and_backtest(df_full, tickers, end_analisa):
             else:
                 saham_data = df_full.dropna()
 
-            if saham_data.empty:
+            if saham_data.empty or 'Close' not in saham_data.columns:
                 continue
 
-            # Tentukan hari beli: first trading day setelah end_analisa
+            # Hari beli = first trading day setelah end_analisa
             future_rows = saham_data.loc[saham_data.index > end_analisa_ts]
             if future_rows.empty:
                 continue
@@ -82,58 +92,48 @@ def run_analysis_and_backtest(df_full, tickers, end_analisa):
             if df_backtest.empty:
                 continue
 
-            # Indikator analisa dihitung di T-0 (hari terakhir analisa)
-            df_analisa = saham_data.loc[:end_analisa_ts]
-            if len(df_analisa) < 35:
-                continue
+            # Hitung daily move (% dari hari sebelumnya)
+            df_backtest['Prev_Close'] = df_backtest['Close'].shift(1)
+            df_backtest['Daily_Move'] = ((df_backtest['Close'] - df_backtest['Prev_Close']) / df_backtest['Prev_Close']) * 100
 
-            c = df_analisa['Close']
-            v = df_analisa['Volume']
-            rsi = float(ta.rsi(c, length=14).iloc[-1])
-            macd = ta.macd(c)
-            macd_h = float(macd.filter(like='MACDh').iloc[-1]) if macd is not None else 0.0
-            ma20 = float(c.rolling(20).mean().iloc[-1])
-            v_ratio = float(v.iloc[-1] / v.rolling(20).mean().iloc[-1])
-            turnover = float(v.iloc[-1] * price_buy)
+            # Cari hari pertama yang mencapai batas ARA sesuai band harga
+            ara_date = None
+            ara_pct = None
+            for idx, row in df_backtest.iterrows():
+                if pd.isna(row['Prev_Close']):
+                    continue
+                band = ara_band(row['Prev_Close'])
+                day_move = (row['Close'] - row['Prev_Close']) / row['Prev_Close'] * 100
+                if day_move >= band:
+                    ara_date = idx
+                    ara_pct = band
+                    break  # ambil tanggal pertama kali ARA
 
-            # Kriteria Top Pick
-            is_top = (55 < rsi < 72) and (macd_h > 0) and (price_buy > ma20) and (v_ratio > 2.5) and (turnover > 2_000_000_000)
-            status = "💎 TOP PICK" if is_top else "Watchlist"
+            # Jika tidak ada ARA, ambil daily move tertinggi
+            if ara_date is None:
+                max_idx = df_backtest['Daily_Move'].idxmax()
+                ara_date = max_idx
+                ara_pct = df_backtest.loc[max_idx, 'Daily_Move']
 
-            # Profit harian dari harga penutupan
-            df_backtest['Daily_Profit'] = ((df_backtest['Close'] - price_buy) / price_buy) * 100.0
+            # Success jika pernah ada ARA >=10% (atau sesuai band)
+            backtest_res = "Success" if ara_pct >= 10 else "Fail"
 
-            # Peak profit penutupan selama 30 hari
-            max_profit_close = float(df_backtest['Daily_Profit'].max())
-            date_of_max = df_backtest['Daily_Profit'].idxmax()
-
-            # Success jika peak >= 10%
-            backtest_res = "Success" if max_profit_close >= 10.0 else "Fail"
-
-            # Tanggal peak & persentase selalu ditampilkan
-            display_date = format_id_date(date_of_max)
-            display_pct = f"{max_profit_close:.2f}%"
+            display_date = format_id_date(ara_date)
+            display_pct = f"{ara_pct:.2f}%"
 
             results.append({
                 'Kode Saham': ticker.replace('.JK',''),
-                'Status': status,
                 'Last Price': round(price_buy, 2),
                 'Backtest Result': backtest_res,
                 'Date': display_date,
-                'Percentage': display_pct,
-                'Vol Ratio': round(v_ratio, 2),
-                'RSI (14)': round(rsi, 2),
-                'Turnover (M)': round(turnover / 1_000_000_000, 2)
+                'Percentage': display_pct
             })
         except Exception:
             continue
 
-    df_final = pd.DataFrame(results)
-    if not df_final.empty:
-        df_final = df_final.sort_values(by='Vol Ratio', ascending=False)
-    return df_final
+    return pd.DataFrame(results)
 
-# --- 5. MAIN APP ---
+# --- 6. MAIN APP ---
 def load_emiten():
     for f in ['Kode Saham.xlsx', 'Kode_Saham.xlsx', 'Kode Saham.csv']:
         if os.path.exists(f):
@@ -161,23 +161,18 @@ if df_emiten is not None:
             saham_lolos = current_prices[(current_prices >= min_p) & (current_prices <= max_p)].index.tolist()
 
         if saham_lolos:
-            st.info(f"Menganalisa {len(saham_lolos)} saham. Mencari puncak profit penutupan (30 hari)...")
+            st.info(f"Menganalisa {len(saham_lolos)} saham. Mencari puncak daily move (30 hari)...")
             with st.spinner('Memproses perhitungan sesuai skenario...'):
                 df_full = fetch_full_data(saham_lolos, start_d, end_d)
                 if not df_full.empty:
                     df_res = run_analysis_and_backtest(df_full, saham_lolos, end_d)
 
-                    st.subheader("🎯 Top Pick & Peak Closing Profit Analysis")
-                    df_top = df_res[df_res['Status'] == "💎 TOP PICK"]
-                    st.dataframe(df_top, use_container_width=True)
-
-                    if not df_top.empty:
-                        win_rate = (len(df_top[df_top['Backtest Result'] == "Success"]) / len(df_top)) * 100
-                        st.metric("Win Rate Top Pick", f"{win_rate:.1f}%")
-
-                    st.divider()
-                    st.subheader("📊 Semua Hasil (Urut Vol Ratio)")
+                    st.subheader("🎯 Top Pick & Daily ARA Analysis")
                     st.dataframe(df_res, use_container_width=True)
+
+                    if not df_res.empty:
+                        win_rate = (len(df_res[df_res['Backtest Result'] == "Success"]) / len(df_res)) * 100
+                        st.metric("Win Rate", f"{win_rate:.1f}%")
         else:
             st.warning("Tidak ada saham yang ditemukan.")
 else:
