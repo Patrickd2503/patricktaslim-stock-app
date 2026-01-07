@@ -1,6 +1,6 @@
+streamlit
 yfinance
 pandas
+pandas_ta
 openpyxl
 xlsxwriter
-beautifulsoup4
-requests
