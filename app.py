@@ -6,156 +6,172 @@ from datetime import date, timedelta
 import os
 from io import BytesIO
 
-# --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI Momentum v12", layout="wide")
-st.title("🚀 Dashboard Momentum: RSI & MACD Breakout")
+# --- 1. CONFIG DASHBOARD ---
+st.set_page_config(page_title="Monitor Saham BEI v12 - Momentum", layout="wide")
 
-# --- 1. FITUR FETCH DATA ---
+# Custom CSS untuk tampilan lebih modern
+st.markdown("""
+    <style>
+    .main { background-color: #f5f7f9; }
+    .stDataFrame { border-radius: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title("🚀 Smart Momentum Monitor")
+st.subheader("RSI, MACD, & Volume Explosion Strategy")
+
+# --- 2. FUNGSI CACHE DATA ---
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
-    # Buffer 1 tahun untuk hitung indikator teknikal (RSI & MACD butuh histori)
+    # Buffer 1 tahun agar perhitungan RSI dan MACD akurat (perlu data histori)
     extended_start = start_date - timedelta(days=365)
     try:
-        df = yf.download(tickers, start=extended_start, end=end_date, threads=True, progress=False)
+        df = yf.download(list(tickers), start=extended_start, end=end_date, threads=True, progress=False)
         if df.empty:
             return pd.DataFrame(), pd.DataFrame()
-        return df['Close'], df['Volume']
-    except:
+        
+        # Penanganan format data yfinance terbaru
+        if isinstance(df.columns, pd.MultiIndex):
+            close_df = df['Close']
+            volume_df = df['Volume']
+        else:
+            close_df = df[['Close']]
+            volume_df = df[['Volume']]
+            
+        return close_df, volume_df
+    except Exception as e:
+        st.error(f"Error saat mengambil data: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-@st.cache_data(ttl=86400)
-def get_free_float(ticker_jk):
-    try:
-        info = yf.Ticker(ticker_jk).info
-        f_shares = info.get('floatShares')
-        total_s = info.get('sharesOutstanding')
-        if f_shares and total_s: return (f_shares / total_s) * 100
-    except: pass
-    return None
-
-# --- 2. LOAD DATABASE EMITEN ---
-def load_data_auto():
-    POSSIBLE_FILES = ['Kode Saham.xlsx - Sheet1.csv', 'Kode Saham.xlsx', 'Kode_Saham.xlsx']
+# --- 3. LOAD DATABASE EMITEN ---
+def load_emiten():
+    POSSIBLE_FILES = ['Kode Saham.xlsx', 'Kode_Saham.xlsx', 'Kode Saham.xlsx - Sheet1.csv']
     for file_name in POSSIBLE_FILES:
         if os.path.exists(file_name):
-            try: 
-                return (pd.read_csv(file_name) if file_name.endswith('.csv') else pd.read_excel(file_name)), file_name
+            try:
+                df = pd.read_csv(file_name) if file_name.endswith('.csv') else pd.read_excel(file_name)
+                # Standarisasi nama kolom
+                df.columns = [c.strip() for c in df.columns]
+                return df
             except: continue
-    return None, None
+    return None
 
-df_emiten, _ = load_data_auto()
-
-# --- 3. LOGIKA ANALISA (MOMENTUM & TREND) ---
+# --- 4. LOGIKA ANALISA MOMENTUM ---
 def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
     results, shortlist_keys = [], []
     
+    if df_c.empty:
+        return pd.DataFrame(), []
+
     for col in df_c.columns:
-        # Pembersihan data
+        # 1. Persiapan Data
         c = df_c[col].dropna()
         v = df_v[col].dropna()
         
-        if len(c) < 30: continue # Butuh minimal data untuk RSI/MACD
+        if len(c) < 35: continue # Minimal data untuk indikator teknikal
         
-        # --- INDIKATOR TEKNIKAL ---
-        # 1. RSI (Periode 14)
+        # 2. Hitung Indikator Teknikal
+        # RSI 14
         rsi = ta.rsi(c, length=14)
-        rsi_last = rsi.iloc[-1] if rsi is not None else 50
+        rsi_last = rsi.iloc[-1] if rsi is not None and not rsi.empty else 50
         
-        # 2. MACD (12, 26, 9)
+        # MACD (12, 26, 9)
         macd_df = ta.macd(c, fast=12, slow=26, signal=9)
-        macd_val = macd_df['MACD_12_26_9'].iloc[-1]
-        macd_sig = macd_df['MACDs_12_26_9'].iloc[-1]
-        macd_hist = macd_df['MACDh_12_26_9'].iloc[-1]
-        
-        # 3. Volume & Price Action
+        if macd_df is not None and not macd_df.empty:
+            macd_hist = macd_df['MACDh_12_26_9'].iloc[-1]
+            macd_val = macd_df['MACD_12_26_9'].iloc[-1]
+            macd_sig = macd_df['MACDs_12_26_9'].iloc[-1]
+        else:
+            macd_hist, macd_val, macd_sig = 0, 0, 0
+            
+        # Volume Spike (Bandingkan dengan rata-rata 20 hari)
         v_sma20 = v.rolling(20).mean().iloc[-1]
         v_last = v.iloc[-1]
         v_ratio = v_last / v_sma20 if v_sma20 > 0 else 0
         
-        chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
+        # Price Action 5 Hari
+        chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5] if len(c) >= 5 else 0
         ticker = str(col).replace('.JK','')
-        
-        # --- FILTER SHORTLIST (TARGET < 2 MINGGU) ---
-        # Syarat 1: RSI sedang menanjak (bukan jenuh beli, tapi kuat)
-        is_rsi_strong = 45 < rsi_last < 75
-        
-        # Syarat 2: MACD Golden Cross atau Bullish Histogram
-        is_macd_bullish = macd_hist > 0 and macd_val > macd_sig
-        
-        # Syarat 3: Volume Explosion (Bandar Masuk)
-        is_vol_spike = v_ratio > 1.8 
-        
-        # Syarat 4: Price Movement (Mulai Breakout)
-        is_breakout = 0.01 < chg_5d < 0.07 
 
-        status = "Netral"
+        # 3. Kriteria Shortlist (Target Naik Cepat)
+        is_rsi_strong = 45 < rsi_last < 72  # Tenaga kuat tapi belum jenuh beli
+        is_macd_bullish = macd_hist > 0 and macd_val > macd_sig # Golden cross/bullish momentum
+        is_vol_spike = v_ratio > 1.8       # Volume minimal 1.8x rata-rata sebulan
+        is_breakout = 0.01 < chg_5d < 0.08 # Harga sudah mulai bergerak naik
+
+        status = "Konsolidasi"
         if is_analisa_lengkap:
-            is_liquid = (v_last / 100) > 500
-            
-            if is_rsi_strong and is_macd_bullish and is_vol_spike and is_liquid:
-                status = "🔥 STRONG BUY"
-                shortlist_keys.append(ticker)
-            elif is_macd_bullish:
-                status = "⤴️ Bullish Turn"
-            elif rsi_last > 70:
-                status = "⚠️ Overbought"
-        
+            # Syarat Tambahan: Likuiditas (min 500 lot transaksi)
+            if (v_last / 100) > 500:
+                if is_rsi_strong and is_macd_bullish and is_vol_spike:
+                    status = "🔥 STRONG BUY"
+                    shortlist_keys.append(ticker)
+                elif is_macd_bullish:
+                    status = "⤴️ Reversal"
+                elif is_breakout:
+                    status = "🚀 Momentum"
+
         results.append({
             'Kode Saham': ticker,
-            'Status': status,
-            'RSI (14)': f"{rsi_last:.1f}",
-            'MACD Hist': f"{macd_hist:.2f}",
-            'Vol Ratio (SMA20)': f"{v_ratio:.2f}x",
-            'Chg 5D (%)': f"{chg_5d*100:.1f}%",
-            'Last Price': f"{int(c.iloc[-1])}"
+            'Analisa': status,
+            'Last Price': int(c.iloc[-1]),
+            'RSI (14)': round(rsi_last, 2),
+            'MACD Hist': round(macd_hist, 2),
+            'Vol Ratio': round(v_ratio, 2),
+            'Chg 5D (%)': f"{chg_5d*100:.1f}%"
         })
         
     return pd.DataFrame(results), shortlist_keys
 
-# --- 4. RENDER DASHBOARD ---
+# --- 5. INTERFACE UTAMA ---
+df_emiten = load_emiten()
+
 if df_emiten is not None:
+    # Sidebar
     st.sidebar.header("Filter Parameter")
-    all_tickers = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
-    selected_tickers = st.sidebar.multiselect("Pantau Saham Tertentu:", options=all_tickers)
+    all_tickers = sorted(df_emiten['Kode Saham'].unique().tolist())
+    selected = st.sidebar.multiselect("Pantau Kode Spesifik:", options=all_tickers)
     
-    min_p = st.sidebar.number_input("Harga Min", value=100)
+    min_p = st.sidebar.number_input("Harga Min", value=50)
     max_p = st.sidebar.number_input("Harga Max", value=5000)
-    start_d = st.sidebar.date_input("Mulai", date.today() - timedelta(days=20))
+    
+    # Range tanggal (Gunakan 1 bulan terakhir untuk deteksi momentum)
+    start_d = st.sidebar.date_input("Mulai", date.today() - timedelta(days=30))
     end_d = st.sidebar.date_input("Akhir", date.today())
 
-    btn_analisa = st.sidebar.button("🚀 Jalankan Analisa Momentum")
-
-    if btn_analisa:
-        with st.spinner('Menghitung RSI & MACD...'):
-            df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
-            tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].unique()]
+    if st.sidebar.button("🚀 Jalankan Analisa"):
+        with st.spinner('Menganalisa Chart & Volume...'):
+            # Filter Emiten
+            to_process = df_emiten[df_emiten['Kode Saham'].isin(selected)] if selected else df_emiten
+            tickers_jk = [str(t).strip() + ".JK" for t in to_process['Kode Saham']]
             
-            df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
+            c_raw, v_raw = fetch_yf_all_data(tickers_jk, start_d, end_d)
             
-            if not df_c_raw.empty:
-                # Handling MultiIndex Columns
-                if isinstance(df_c_raw.columns, pd.MultiIndex):
-                    df_c_raw.columns = df_c_raw.columns.get_level_values(1)
-                    df_v_raw.columns = df_v_raw.columns.get_level_values(1)
-
-                # Filter Harga & Likuiditas
-                last_prices = df_c_raw.ffill().iloc[-1]
-                saham_lolos = last_prices[(last_prices >= min_p) & (last_prices <= max_p)].index
+            if not c_raw.empty:
+                # Filter harga saat ini
+                last_p = c_raw.ffill().iloc[-1]
+                saham_lolos = last_p[(last_p >= min_p) & (last_p <= max_p)].index
                 
-                df_analysis, shortlist_keys = get_signals_and_data(df_c_raw[saham_lolos], df_v_raw[saham_lolos], is_analisa_lengkap=True)
-
-                # TAMPILKAN SHORTLIST
-                st.subheader("🎯 Momentum Shortlist (Potensi Naik < 2 Minggu)")
-                st.write("Kriteria: RSI Kuat, MACD Bullish, & Volume Explosion.")
+                df_res, shortlists = get_signals_and_data(c_raw[saham_lolos], v_raw[saham_lolos], True)
                 
-                df_top = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)]
-                if not df_top.empty:
-                    st.dataframe(df_top.style.background_gradient(cmap='RdYlGn', subset=['RSI (14)']), use_container_width=True)
+                if not df_res.empty:
+                    # 1. Tampilan Shortlist
+                    st.subheader("🎯 Shortlist Terpilih (Potensi Cepat)")
+                    df_top = df_res[df_res['Kode Saham'].isin(shortlists)]
+                    
+                    if not df_top.empty:
+                        st.success(f"Ditemukan {len(df_top)} Saham dengan konfirmasi Smart Money.")
+                        st.dataframe(df_top.style.background_gradient(subset=['Vol Ratio'], cmap='Greens'), use_container_width=True)
+                    else:
+                        st.info("Belum ada saham yang memenuhi kriteria 'Strong Buy' hari ini.")
+                    
+                    # 2. Tabel Lengkap
+                    st.divider()
+                    st.subheader("📊 Seluruh Hasil Screening")
+                    st.dataframe(df_res, use_container_width=True)
                 else:
-                    st.info("Belum ada saham yang memenuhi kriteria ledakan momentum.")
-
-                st.divider()
-                st.subheader("📊 Seluruh Hasil Analisa")
-                st.dataframe(df_analysis, use_container_width=True)
+                    st.warning("Tidak ada saham yang memenuhi filter dasar.")
+            else:
+                st.error("Gagal mengambil data dari Yahoo Finance.")
 else:
-    st.error("File database 'Kode Saham.xlsx' tidak ditemukan.")
+    st.error("File 'Kode Saham.xlsx' tidak ditemukan di direktori.")
