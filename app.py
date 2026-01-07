@@ -1,18 +1,19 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import pandas_ta as ta
 from datetime import date, timedelta
 import os
 from io import BytesIO
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI Ultra v11", layout="wide")
-st.title("🎯 Dashboard Akumulasi: Smart Money Monitor")
+st.set_page_config(page_title="Monitor Saham BEI Momentum v12", layout="wide")
+st.title("🚀 Dashboard Momentum: RSI & MACD Breakout")
 
-# --- 1. FITUR CACHE ---
+# --- 1. FITUR FETCH DATA ---
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
-    # Buffer data 12 bulan (365 hari) ke belakang untuk analisa histori ARA
+    # Buffer 1 tahun untuk hitung indikator teknikal (RSI & MACD butuh histori)
     extended_start = start_date - timedelta(days=365)
     try:
         df = yf.download(tickers, start=extended_start, end=end_date, threads=True, progress=False)
@@ -32,7 +33,7 @@ def get_free_float(ticker_jk):
     except: pass
     return None
 
-# --- 2. LOAD DATA ---
+# --- 2. LOAD DATABASE EMITEN ---
 def load_data_auto():
     POSSIBLE_FILES = ['Kode Saham.xlsx - Sheet1.csv', 'Kode Saham.xlsx', 'Kode_Saham.xlsx']
     for file_name in POSSIBLE_FILES:
@@ -44,155 +45,117 @@ def load_data_auto():
 
 df_emiten, _ = load_data_auto()
 
-# --- 3. FUNGSI PEWARNAAN ---
-def style_control(val):
-    try:
-        num = float(str(val).replace('%', '').replace(',', '.'))
-        if num > 70: return 'background-color: #ff4b4b; color: white; font-weight: bold'
-        if num > 50: return 'background-color: #ffa500; color: black'
-    except: pass
-    return ''
-
-def style_percentage(val):
-    try:
-        num_val = float(str(val).replace('%', '').replace(',', '.'))
-        if num_val > 0: return 'background-color: rgba(144, 238, 144, 0.4)'
-        elif num_val < 0: return 'background-color: rgba(255, 182, 193, 0.4)'
-        elif num_val == 0: return 'background-color: rgba(255, 255, 0, 0.3)'
-    except: pass
-    return ''
-
-# --- 4. FUNGSI EXPORT EXCEL ---
-def export_to_excel(df_pct, df_prc, df_top=None):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        if df_top is not None and not df_top.empty:
-            df_top.to_excel(writer, index=False, sheet_name='1. Shortlist Terpilih')
-        df_pct.to_excel(writer, index=False, sheet_name='2. Data Persentase')
-        df_prc.to_excel(writer, index=False, sheet_name='3. Data Harga IDR')
-    return output.getvalue()
-
-# --- 5. LOGIKA ANALISA (Update: Histori 12 Bulan & Hitung ARA) ---
+# --- 3. LOGIKA ANALISA (MOMENTUM & TREND) ---
 def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
     results, shortlist_keys = [], []
+    
     for col in df_c.columns:
-        c, v = df_c[col].dropna(), df_v[col].dropna()
-        if len(c) < 6: continue
+        # Pembersihan data
+        c = df_c[col].dropna()
+        v = df_v[col].dropna()
         
-        # Analisa Histori 12 Bulan (Data bursa +/- 252 hari)
-        lookback_12m = c.iloc[-252:] if len(c) >= 252 else c
-        daily_changes = lookback_12m.pct_change() * 100
+        if len(c) < 30: continue # Butuh minimal data untuk RSI/MACD
         
-        # 1. Kenaikan harian tertinggi dalam 12 bulan
-        max_daily_gain = daily_changes.max() if not daily_changes.empty else 0
+        # --- INDIKATOR TEKNIKAL ---
+        # 1. RSI (Periode 14)
+        rsi = ta.rsi(c, length=14)
+        rsi_last = rsi.iloc[-1] if rsi is not None else 50
         
-        # 2. Hitung berapa kali gain > 20% (Potensi ARA)
-        count_ara_potential = (daily_changes > 20).sum()
-
-        v_sma5 = v.rolling(5).mean().iloc[-1]
+        # 2. MACD (12, 26, 9)
+        macd_df = ta.macd(c, fast=12, slow=26, signal=9)
+        macd_val = macd_df['MACD_12_26_9'].iloc[-1]
+        macd_sig = macd_df['MACDs_12_26_9'].iloc[-1]
+        macd_hist = macd_df['MACDh_12_26_9'].iloc[-1]
+        
+        # 3. Volume & Price Action
+        v_sma20 = v.rolling(20).mean().iloc[-1]
         v_last = v.iloc[-1]
-        v_ratio = v_last / v_sma5 if v_sma5 > 0 else 0
+        v_ratio = v_last / v_sma20 if v_sma20 > 0 else 0
+        
         chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
         ticker = str(col).replace('.JK','')
         
-        vol_control_pct = (v_ratio / (v_ratio + 1)) * 100 
+        # --- FILTER SHORTLIST (TARGET < 2 MINGGU) ---
+        # Syarat 1: RSI sedang menanjak (bukan jenuh beli, tapi kuat)
+        is_rsi_strong = 45 < rsi_last < 75
         
-        ff_pct = None
-        if is_analisa_lengkap:
-            ff_pct = get_free_float(col)
-            is_sideways = abs(chg_5d) < 0.02 
-            is_high_control = vol_control_pct > 70 
-            is_low_float = ff_pct is not None and ff_pct < 40 
-            is_liquid = (v_last / 100) > 500   
-            
-            status = "Normal"
-            if is_sideways and v_ratio >= 1.2:
-                status = f"💎 Akumulasi (V:{v_ratio:.1f})"
-                if is_high_control and is_low_float and is_liquid:
-                    shortlist_keys.append(ticker)
-            elif chg_5d > 0.05: status = "🚀 Markup"
-        else:
-            status = "N/A"
+        # Syarat 2: MACD Golden Cross atau Bullish Histogram
+        is_macd_bullish = macd_hist > 0 and macd_val > macd_sig
+        
+        # Syarat 3: Volume Explosion (Bandar Masuk)
+        is_vol_spike = v_ratio > 1.8 
+        
+        # Syarat 4: Price Movement (Mulai Breakout)
+        is_breakout = 0.01 < chg_5d < 0.07 
 
+        status = "Netral"
+        if is_analisa_lengkap:
+            is_liquid = (v_last / 100) > 500
+            
+            if is_rsi_strong and is_macd_bullish and is_vol_spike and is_liquid:
+                status = "🔥 STRONG BUY"
+                shortlist_keys.append(ticker)
+            elif is_macd_bullish:
+                status = "⤴️ Bullish Turn"
+            elif rsi_last > 70:
+                status = "⚠️ Overbought"
+        
         results.append({
             'Kode Saham': ticker,
-            'Analisa Akumulasi': status,
-            'Max Daily Gain (12M)': f"{max_daily_gain:.1f}%",
-            'Frekuensi >20% (12M)': f"{int(count_ara_potential)}x",
-            'Vol Control (%)': f"{vol_control_pct:.1f}%",
-            'Free Float (%)': f"{ff_pct:.1f}%" if ff_pct else "N/A",
-            'Rata Lot (5D)': f"{int(v_sma5/100):,}",
-            'Total Lot (Today)': f"{int(v_last/100):,}"
+            'Status': status,
+            'RSI (14)': f"{rsi_last:.1f}",
+            'MACD Hist': f"{macd_hist:.2f}",
+            'Vol Ratio (SMA20)': f"{v_ratio:.2f}x",
+            'Chg 5D (%)': f"{chg_5d*100:.1f}%",
+            'Last Price': f"{int(c.iloc[-1])}"
         })
+        
     return pd.DataFrame(results), shortlist_keys
 
-# --- 6. RENDER DASHBOARD ---
+# --- 4. RENDER DASHBOARD ---
 if df_emiten is not None:
-    st.sidebar.header("Filter & Parameter")
+    st.sidebar.header("Filter Parameter")
     all_tickers = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
-    selected_tickers = st.sidebar.multiselect("Cari Kode:", options=all_tickers)
+    selected_tickers = st.sidebar.multiselect("Pantau Saham Tertentu:", options=all_tickers)
     
     min_p = st.sidebar.number_input("Harga Min", value=100)
-    max_p = st.sidebar.number_input("Harga Max", value=10000)
-    start_d = st.sidebar.date_input("Mulai", date(2025, 12, 1))
-    end_d = st.sidebar.date_input("Akhir", date(2025, 12, 17))
+    max_p = st.sidebar.number_input("Harga Max", value=5000)
+    start_d = st.sidebar.date_input("Mulai", date.today() - timedelta(days=20))
+    end_d = st.sidebar.date_input("Akhir", date.today())
 
-    st.sidebar.markdown("---")
-    btn_split = st.sidebar.button("📊 1. Split View (All Data)")
-    btn_analisa = st.sidebar.button("🚀 2. Jalankan Analisa Lengkap")
+    btn_analisa = st.sidebar.button("🚀 Jalankan Analisa Momentum")
 
-    if btn_split or btn_analisa:
-        with st.spinner('Menarik data histori 12 bulan...'):
+    if btn_analisa:
+        with st.spinner('Menghitung RSI & MACD...'):
             df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
             tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].unique()]
+            
             df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
             
             if not df_c_raw.empty:
+                # Handling MultiIndex Columns
                 if isinstance(df_c_raw.columns, pd.MultiIndex):
                     df_c_raw.columns = df_c_raw.columns.get_level_values(1)
                     df_v_raw.columns = df_v_raw.columns.get_level_values(1)
 
-                df_c_work = df_c_raw.ffill()
-                last_p_val = df_c_work.iloc[-1]
-                saham_lolos = df_c_work.columns if selected_tickers else last_p_val[(last_p_val >= min_p) & (last_p_val <= max_p)].index
+                # Filter Harga & Likuiditas
+                last_prices = df_c_raw.ffill().iloc[-1]
+                saham_lolos = last_prices[(last_prices >= min_p) & (last_prices <= max_p)].index
                 
-                df_f_c, df_f_v = df_c_raw[saham_lolos], df_v_raw[saham_lolos]
-                df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v, is_analisa_lengkap=btn_analisa)
+                df_analysis, shortlist_keys = get_signals_and_data(df_c_raw[saham_lolos], df_v_raw[saham_lolos], is_analisa_lengkap=True)
 
-                def prepare_display(df_source, df_analysis_res, is_pct=True):
-                    df_target = df_source.loc[pd.to_datetime(start_d):pd.to_datetime(end_d)].ffill()
-                    df_val = (df_target.pct_change() * 100).applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "0.0%") if is_pct else df_target.applymap(lambda x: int(x) if pd.notnull(x) else 0)
-                    df_val.index = df_val.index.strftime('%d/%m/%Y')
-                    df_t = df_val.T
-                    df_t.index = df_t.index.str.replace('.JK', '', regex=False)
-                    m = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_t, left_on='Kode Saham', right_index=True)
-                    m = pd.merge(m, df_analysis_res, on='Kode Saham', how='left')
-                    cols = list(m.columns)
-                    # Metadata (Kolom Identitas + 7 Kolom Analisa Baru)
-                    return m[[cols[0], cols[1], cols[-7], cols[-6], cols[-5], cols[-4], cols[-3], cols[-2], cols[-1]] + cols[2:-7]]
+                # TAMPILKAN SHORTLIST
+                st.subheader("🎯 Momentum Shortlist (Potensi Naik < 2 Minggu)")
+                st.write("Kriteria: RSI Kuat, MACD Bullish, & Volume Explosion.")
+                
+                df_top = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)]
+                if not df_top.empty:
+                    st.dataframe(df_top.style.background_gradient(cmap='RdYlGn', subset=['RSI (14)']), use_container_width=True)
+                else:
+                    st.info("Belum ada saham yang memenuhi kriteria ledakan momentum.")
 
-                df_all_pct = prepare_display(df_f_c, df_analysis, is_pct=True)
-                df_all_prc = prepare_display(df_f_c, df_analysis, is_pct=False)
-
-                # Tombol Download
-                excel_data = export_to_excel(df_all_pct, df_all_prc, df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)])
-                st.download_button(label="📥 Download Hasil ke Excel", data=excel_data, file_name=f"Analisa_ARA_Histori_{end_d}.xlsx")
-
-                if btn_split:
-                    st.subheader("📈 Tabel 1: Persentase Perubahan Harian (%)")
-                    st.dataframe(df_all_pct.style.applymap(style_percentage, subset=df_all_pct.columns[9:]), use_container_width=True)
-                    st.subheader("💰 Tabel 2: Harga Nominal Harian (IDR)")
-                    st.dataframe(df_all_prc, use_container_width=True)
-
-                elif btn_analisa:
-                    st.subheader("🎯 Shortlist Terpilih")
-                    df_top = df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)]
-                    if not df_top.empty:
-                        st.dataframe(df_top.style.applymap(style_control, subset=['Vol Control (%)']).applymap(style_percentage, subset=df_top.columns[9:]), use_container_width=True)
-                    else:
-                        st.info("Tidak ada saham yang memenuhi kriteria akumulasi khusus.")
-                    st.divider()
-                    st.subheader("📈 Tabel Lengkap")
-                    st.dataframe(df_all_pct.style.applymap(style_control, subset=['Vol Control (%)']).applymap(style_percentage, subset=df_all_pct.columns[9:]), use_container_width=True)
+                st.divider()
+                st.subheader("📊 Seluruh Hasil Analisa")
+                st.dataframe(df_analysis, use_container_width=True)
 else:
-    st.error("Database tidak ditemukan.")
+    st.error("File database 'Kode Saham.xlsx' tidak ditemukan.")
