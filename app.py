@@ -9,22 +9,25 @@ import os
 st.set_page_config(page_title="Top Pick Momentum Monitor", layout="wide")
 st.title("💎 Top Pick Momentum Screener")
 
-# --- 1. FUNGSI FETCH HARGA TERAKHIR (CEPAT) ---
+# --- 1. FUNGSI FETCH HARGA TERAKHIR (UNTUK FILTER AWAL) ---
 def get_current_prices(tickers):
-    """Mengambil harga terakhir saja untuk filter awal agar cepat"""
     try:
         data = yf.download(tickers, period="1d", threads=True, progress=False)
         if data.empty: return pd.Series()
-        return data['Close'].iloc[-1]
+        # Mengambil harga Close terakhir
+        if isinstance(data.columns, pd.MultiIndex):
+            return data['Close'].iloc[-1]
+        return data['Close']
     except:
         return pd.Series()
 
-# --- 2. FUNGSI FETCH DATA HISTORI (HANYA UNTUK YANG LOLOS FILTER) ---
+# --- 2. FUNGSI FETCH DATA HISTORI (UNTUK ANALISA) ---
 @st.cache_data(ttl=3600)
-def fetch_hist_data(tickers, start_date):
+def fetch_hist_data(tickers, start_date, end_date):
+    # Buffer data 1 tahun untuk akurasi indikator MACD & RSI
     extended_start = start_date - timedelta(days=365)
     try:
-        df = yf.download(list(tickers), start=extended_start, threads=True, progress=False)
+        df = yf.download(list(tickers), start=extended_start, end=end_date, threads=True, progress=False)
         if df.empty: return pd.DataFrame(), pd.DataFrame()
         
         if isinstance(df.columns, pd.MultiIndex):
@@ -33,7 +36,7 @@ def fetch_hist_data(tickers, start_date):
     except:
         return pd.DataFrame(), pd.DataFrame()
 
-# --- 3. LOGIKA ANALISA (FIX VALUEERROR) ---
+# --- 3. LOGIKA ANALISA HIGH CONVICTION ---
 def get_signals(df_c, df_v):
     results, shortlist_keys = [], []
     if df_c.empty: return pd.DataFrame(), []
@@ -48,7 +51,7 @@ def get_signals(df_c, df_v):
         rsi_val = float(rsi.iloc[-1]) if rsi is not None and not rsi.empty else 50
         
         macd = ta.macd(c)
-        # Fix ValueError: Pastikan mengambil angka tunggal (float)
+        # Ambil histogram terakhir secara aman (float tunggal)
         macd_h = float(macd.filter(like='MACDh').iloc[-1]) if macd is not None and not macd.empty else 0
         
         ma20 = c.rolling(20).mean().iloc[-1]
@@ -59,12 +62,12 @@ def get_signals(df_c, df_v):
         v_ratio = float(v_last / v_sma20) if v_sma20 > 0 else 0
         turnover = v_last * price_last
         
-        # PARAMETER KETAT (Konversi ke boolean murni)
-        is_strong_rsi = bool(55 < rsi_val < 70)
-        is_bullish_macd = bool(macd_h > 0)
-        is_above_ma20 = bool(price_last > ma20)
-        is_ultra_vol = bool(v_ratio > 2.5)
-        is_liquid = bool(turnover > 2_000_000_000)
+        # KRITERIA KETAT
+        is_strong_rsi = 55 < rsi_val < 70
+        is_bullish_macd = macd_h > 0
+        is_above_ma20 = price_last > ma20
+        is_ultra_vol = v_ratio > 2.5
+        is_liquid = turnover > 2_000_000_000 # Min Transaksi 2 Miliar
         
         ticker = str(col).replace('.JK','')
         
@@ -82,13 +85,14 @@ def get_signals(df_c, df_v):
             'Last Price': int(price_last),
             'Vol Ratio': round(v_ratio, 2),
             'RSI (14)': round(rsi_val, 2),
-            'Turnover (M)': round(turnover / 1_000_000_000, 2)
+            'Turnover (M)': round(turnover / 1_000_000_000, 2),
+            'MA20 Dist (%)': round(((price_last - ma20) / ma20) * 100, 2)
         })
         
-    df_results = pd.DataFrame(results)
-    if not df_results.empty:
-        df_results = df_results.sort_values(by='Vol Ratio', ascending=False)
-    return df_results, shortlist_keys
+    df_res = pd.DataFrame(results)
+    if not df_res.empty:
+        df_res = df_res.sort_values(by='Vol Ratio', ascending=False)
+    return df_res, shortlist_keys
 
 # --- 4. MAIN APP ---
 def load_emiten():
@@ -105,27 +109,38 @@ df_emiten = load_emiten()
 
 if df_emiten is not None:
     st.sidebar.header("Filter Parameter")
+    all_codes = sorted(df_emiten['Kode Saham'].unique().tolist())
+    selected = st.sidebar.multiselect("Pantau Kode Spesifik:", options=all_codes)
+    
     min_p = st.sidebar.number_input("Harga Min", value=100)
     max_p = st.sidebar.number_input("Harga Max", value=900)
     
+    # --- INPUT PERIODE (DIMUNCULKAN KEMBALI) ---
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Periode Analisa")
+    start_d = st.sidebar.date_input("Mulai", date.today() - timedelta(days=30))
+    end_d = st.sidebar.date_input("Akhir", date.today())
+
     if st.sidebar.button("🚀 Jalankan Analisa"):
-        all_tickers = [str(t).strip() + ".JK" for t in df_emiten['Kode Saham']]
+        target_codes = selected if selected else df_emiten['Kode Saham'].tolist()
+        tickers_jk = [str(t).strip() + ".JK" for t in target_codes]
         
-        with st.spinner('Menyaring harga (Filter Awal)...'):
-            # Langkah 1: Ambil harga terakhir saja untuk SEMUA saham
-            current_prices = get_current_prices(all_tickers)
+        with st.spinner('Menyaring harga...'):
+            current_prices = get_current_prices(tickers_jk)
+            # Saring saham yang harganya masuk rentang
+            saham_lolos = current_prices[(current_prices >= min_p) & (current_prices <= max_p)].index.tolist()
             
-            # Langkah 2: Saring mana yang masuk rentang 100 - 900
-            saham_lolos_filter = current_prices[(current_prices >= min_p) & (current_prices <= max_p)].index.tolist()
-            
-        if saham_lolos_filter:
-            st.info(f"Ditemukan {len(saham_lolos_filter)} saham dalam rentang harga. Menganalisa histori...")
-            
-            with st.spinner('Menarik data histori & indikator...'):
-                # Langkah 3: Hanya tarik histori lengkap untuk saham yang lolos filter harga
-                c_raw, v_raw = fetch_hist_data(saham_lolos_filter, date.today() - timedelta(days=30))
+        if saham_lolos:
+            st.info(f"Ditemukan {len(saham_lolos)} saham dalam rentang harga. Memulai analisa momentum...")
+            with st.spinner('Menarik data histori & menghitung indikator...'):
+                c_raw, v_raw = fetch_hist_data(saham_lolos, start_d, end_d)
                 
                 if not c_raw.empty:
+                    # Penanganan jika hanya 1 saham yang lolos
+                    if len(saham_lolos) == 1:
+                        c_raw.columns = [saham_lolos[0]]
+                        v_raw.columns = [saham_lolos[0]]
+
                     df_res, shortlists = get_signals(c_raw, v_raw)
                     
                     st.subheader("🎯 Top Pick Terpilih")
@@ -133,12 +148,14 @@ if df_emiten is not None:
                     if not df_top.empty:
                         st.dataframe(df_top, use_container_width=True)
                     else:
-                        st.info("Tidak ada yang lolos kriteria 'TOP PICK'.")
+                        st.info("Tidak ada saham yang memenuhi kriteria ultra ketat 'TOP PICK' saat ini.")
                         
                     st.divider()
-                    st.subheader("📊 Hasil Screening Lengkap")
+                    st.subheader("📊 Hasil Screening Lengkap (Auto-Sort by Vol Ratio)")
                     st.dataframe(df_res, use_container_width=True)
+                else:
+                    st.error("Gagal mengambil data histori. Pastikan periode tanggal valid.")
         else:
             st.warning("Tidak ada saham yang ditemukan dalam rentang harga tersebut.")
 else:
-    st.error("File database tidak ditemukan.")
+    st.error("File database 'Kode Saham.xlsx' tidak ditemukan.")
