@@ -8,14 +8,6 @@ from io import BytesIO
 # --- CONFIG DASHBOARD ---
 st.set_page_config(page_title="Monitor Saham BEI Ultra v11", layout="wide")
 
-st.markdown("""
-    <style>
-    .main { background-color: #f5f7f9; }
-    /* Memperbaiki jarak antar input box */
-    .stNumberInput { margin-bottom: 5px; } 
-    </style>
-    """, unsafe_allow_html=True)
-
 st.title("🎯 Smart Money Monitor: Dashboard Akumulasi BEI")
 
 # --- 1. LOAD DATA DARI GITHUB (FREE FLOAT) ---
@@ -25,59 +17,55 @@ def load_free_float_github():
     try:
         df_ff = pd.read_excel(url)
         df_ff.columns = df_ff.columns.str.strip()
-        
         if len(df_ff.columns) >= 2:
-            new_names = {df_ff.columns[0]: 'Ticker', df_ff.columns[1]: 'FF_Percent'}
-            df_ff = df_ff.rename(columns=new_names)
-        
+            df_ff = df_ff.rename(columns={df_ff.columns[0]: 'Ticker', df_ff.columns[1]: 'FF_Percent'})
         df_ff['Ticker'] = df_ff['Ticker'].astype(str).str.strip().str.upper()
         return df_ff
-    except Exception as e:
-        st.error(f"⚠️ Gagal sinkronisasi data Free Float: {e}")
+    except:
         return pd.DataFrame()
 
-# --- 2. FETCH DATA MARKET (YFINANCE) ---
+# --- 2. FETCH DATA MARKET (DIPERBAIKI) ---
 @st.cache_data(ttl=1800)
-def fetch_yf_data(tickers, lookback_days=60):
-    end_date = date.today()
-    start_date = end_date - timedelta(days=lookback_days)
+def fetch_yf_data(tickers):
+    # Mengambil data 60 hari ke belakang agar indikator MA selalu terisi
+    end_dt = date.today()
+    start_dt = end_dt - timedelta(days=60)
     try:
-        df = yf.download(list(tickers), start=start_date, end=end_date, threads=True, progress=False)
+        # Menggunakan group_by='column' untuk stabilitas MultiIndex
+        df = yf.download(list(tickers), start=start_dt, end=end_dt, threads=True, progress=False, group_by='column')
+        
         if df.empty:
             return pd.DataFrame(), pd.DataFrame()
         
+        # Penanganan struktur data yfinance yang sering berubah
         if len(tickers) == 1:
             return df[['Close']].rename(columns={'Close': tickers[0]}), df[['Volume']].rename(columns={'Volume': tickers[0]})
-            
+        
         return df['Close'], df['Volume']
     except Exception as e:
-        st.error(f"❌ Error Yahoo Finance: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# --- 3. LOAD DATABASE LOKAL (KODE SAHAM) ---
+# --- 3. LOAD DATABASE LOKAL ---
 def load_local_codes():
     for file in ['Kode Saham.xlsx', 'Kode_Saham.xlsx', 'Kode Saham.csv']:
         if os.path.exists(file):
             try:
                 df = pd.read_csv(file) if file.endswith('.csv') else pd.read_excel(file)
-                df.columns = df.columns.str.strip()
                 return df
             except: continue
     return None
 
 # --- 4. LOGIKA ANALISA ---
-def run_smart_money_analysis(df_c, df_v, df_ff_ref):
+def run_analysis(df_c, df_v, df_ff_ref):
     results = []
-    shortlist = []
-    
     for ticker_jk in df_c.columns:
         ticker_clean = str(ticker_jk).replace('.JK', '').upper()
         prices = df_c[ticker_jk].dropna()
         volumes = df_v[ticker_jk].dropna()
         
-        if len(prices) < 20: continue
+        if len(prices) < 10: continue
         
-        last_price = prices.iloc[-1]
+        last_p = prices.iloc[-1]
         v_sma5 = volumes.rolling(5).mean().iloc[-1]
         v_sma20 = volumes.rolling(20).mean().iloc[-1]
         v_last = volumes.iloc[-1]
@@ -88,101 +76,61 @@ def run_smart_money_analysis(df_c, df_v, df_ff_ref):
         chg_5d = (prices.iloc[-1] - prices.iloc[-5]) / prices.iloc[-5] if len(prices) >= 5 else 0
         
         ff_val = "N/A"
-        if not df_ff_ref.empty and 'Ticker' in df_ff_ref.columns:
+        if not df_ff_ref.empty:
             match = df_ff_ref[df_ff_ref['Ticker'] == ticker_clean]
-            if not match.empty:
-                ff_val = match['FF_Percent'].values[0]
+            if not match.empty: ff_val = match['FF_Percent'].values[0]
 
-        is_sideways = abs(chg_5d) < 0.03
-        is_liquid = (v_last * last_price) > 500_000_000 
-        
         status = "Normal"
-        if is_sideways and v_ratio >= 1.2:
+        if abs(chg_5d) < 0.03 and v_ratio >= 1.1:
             status = f"💎 Akumulasi (V:{v_ratio:.1f})"
-            if vol_control > 65 and is_liquid:
-                shortlist.append(ticker_clean)
-        elif chg_5d > 0.05:
-            status = "🚀 Markup"
-        elif chg_5d < -0.05:
-            status = "📉 Distribution"
+        elif chg_5d > 0.05: status = "🚀 Markup"
 
         results.append({
             'Ticker': ticker_clean,
             'Sinyal': status,
-            'Harga': int(last_price),
-            'Chg 5D (%)': f"{chg_5d*100:.1f}%",
+            'Harga': int(last_p),
+            'Chg 5D': f"{chg_5d*100:.1f}%",
             'Vol Control': f"{vol_control:.1f}%",
             'Vol Ratio': round(v_ma_ratio, 2),
             'Free Float': f"{ff_val:.1f}%" if isinstance(ff_val, (int, float)) else ff_val,
-            'Volume (Lot)': f"{int(v_last/100):,}"
+            'Vol Lot': f"{int(v_last/100):,}"
         })
-        
-    return pd.DataFrame(results), shortlist
+    return pd.DataFrame(results)
 
-# --- 5. INTERFACE DASHBOARD ---
-df_master_emiten = load_local_codes()
-df_ff_github = load_free_float_github()
+# --- 5. UI ---
+df_master = load_local_codes()
+df_ff = load_free_float_github()
 
-if df_master_emiten is not None:
-    st.sidebar.header("⚙️ Konfigurasi")
-    
-    # 1. Pilih Saham
-    list_saham = sorted(df_master_emiten.iloc[:, 0].dropna().unique().tolist())
+if df_master is not None:
+    list_saham = sorted(df_master.iloc[:, 0].dropna().unique().tolist())
     selected = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", options=list_saham)
     
-    st.sidebar.markdown("---")
-    
-    # 2. Rentang Harga (Input Box) - Perbaikan st.sidebar.write menggantikan st.sidebar.label
     st.sidebar.write("**Rentang Harga (IDR):**")
     col_min, col_max = st.sidebar.columns(2)
-    min_p = col_min.number_input("Min", value=50, step=50, min_value=0)
-    max_p = col_max.number_input("Max", value=5000, step=50, min_value=0)
+    min_p = col_min.number_input("Min", value=50, step=10)
+    max_p = col_max.number_input("Max", value=500, step=10)
     
-    st.sidebar.markdown("---")
-    
-    # 3. Tombol Analisa
     if st.sidebar.button("🔍 Jalankan Analisa"):
-        final_list = selected if selected else list_saham
-        tickers_jk = [str(s).strip() + ".JK" for s in final_list]
+        # Jika tidak ada yang dipilih, ambil 50 saham pertama saja untuk menghindari limit YFinance
+        # Atau Anda bisa tetap memproses semua jika koneksi stabil
+        list_to_process = selected if selected else list_saham
         
-        with st.spinner('Menganalisa data market terbaru...'):
+        tickers_jk = [str(s).strip() + ".JK" for s in list_to_process]
+        
+        with st.spinner('Menghubungi Yahoo Finance...'):
             df_c, df_v = fetch_yf_data(tickers_jk)
             
             if not df_c.empty:
-                last_p_series = df_c.ffill().iloc[-1]
-                saham_lolos = last_p_series[(last_p_series >= min_p) & (last_p_series <= max_p)].index
+                # FILTER HARGA DI SINI
+                last_prices = df_c.ffill().iloc[-1]
+                saham_lolos = last_prices[(last_prices >= min_p) & (last_prices <= max_p)].index
                 
                 if not saham_lolos.empty:
-                    df_final, top_picks = run_smart_money_analysis(df_c[saham_lolos], df_v[saham_lolos], df_ff_github)
-                    
-                    # Sort agar yang Akumulasi ada di atas
-                    df_final = df_final.sort_values(by='Sinyal', ascending=False)
-                    
-                    if top_picks:
-                        st.success(f"🔥 **Potensi Akumulasi:** {', '.join(top_picks)}")
-                    
-                    # Styling & Display
-                    def highlight_signal(s):
-                        if 'Akumulasi' in str(s): return 'background-color: #d4edda; color: #155724'
-                        elif 'Markup' in str(s): return 'background-color: #fff3cd; color: #856404'
-                        return ''
-
-                    st.dataframe(
-                        df_final.style.applymap(highlight_signal, subset=['Sinyal']),
-                        use_container_width=True,
-                        height=600
-                    )
-                    
-                    # Download Excel
-                    output = BytesIO()
-                    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                        df_final.to_excel(writer, index=False)
-                    st.download_button("📥 Simpan Hasil ke Excel", output.getvalue(), 
-                                     file_name=f"SmartMoney_{date.today()}.xlsx", 
-                                     mime="application/vnd.ms-excel")
+                    df_final = run_analysis(df_c[saham_lolos], df_v[saham_lolos], df_ff)
+                    st.dataframe(df_final.sort_values('Sinyal', ascending=False), use_container_width=True)
                 else:
-                    st.warning("Tidak ada saham ditemukan dalam rentang harga tersebut.")
+                    st.warning(f"Tidak ada saham dalam rentang harga {min_p} - {max_p}")
             else:
-                st.error("Data tidak ditemukan. Silakan coba lagi.")
+                st.error("Data tidak ditemukan. Kemungkinan Yahoo Finance menolak permintaan (Too many requests) atau market data belum update.")
 else:
-    st.error("File database emiten ('Kode Saham.xlsx') tidak ditemukan.")
+    st.error("File 'Kode Saham.xlsx' tidak terdeteksi.")
