@@ -4,36 +4,44 @@ import pandas as pd
 from datetime import date, timedelta
 import os
 from io import BytesIO
+import requests
 
 # --- CONFIG DASHBOARD ---
 st.set_page_config(page_title="Monitor Saham BEI Ultra v11", layout="wide")
 st.title("🎯 Dashboard Akumulasi: Smart Money Monitor")
 
-# --- 1. FITUR CACHE ---
+# --- 1. LOAD DATA EXTERNAL (GITHUB) ---
+@st.cache_data(ttl=86400) # Cache 24 jam
+def load_free_float_github():
+    # Menggunakan link raw agar bisa dibaca pandas
+    url = "https://github.com/Patrickd2503/patricktaslim-stock-app/raw/main/FreeFloat.xlsx"
+    try:
+        df_ff = pd.read_excel(url)
+        # Pastikan kolom seragam (biasanya: 'Ticker' dan 'Free Float')
+        # Sesuaikan nama kolom jika di file Anda berbeda
+        return df_ff
+    except Exception as e:
+        st.error(f"Gagal memuat data Free Float dari GitHub: {e}")
+        return pd.DataFrame()
+
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
     extended_start = start_date - timedelta(days=365)
     try:
-        df = yf.download(tickers, start=extended_start, end=end_date, threads=True, progress=False)
-        if df.empty:
-            return pd.DataFrame(), pd.DataFrame()
+        df = yf.download(list(tickers), start=extended_start, end=end_date, threads=True, progress=False)
+        if df.empty: return pd.DataFrame(), pd.DataFrame()
+        
+        if len(tickers) == 1:
+            return df[['Close']].rename(columns={'Close': tickers[0]}), df[['Volume']].rename(columns={'Volume': tickers[0]})
+        
         return df['Close'], df['Volume']
-    except:
+    except Exception as e:
+        st.error(f"YFinance Error: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-@st.cache_data(ttl=86400)
-def get_free_float(ticker_jk):
-    try:
-        info = yf.Ticker(ticker_jk).info
-        f_shares = info.get('floatShares')
-        total_s = info.get('sharesOutstanding')
-        if f_shares and total_s: return (f_shares / total_s) * 100
-    except: pass
-    return None
-
-# --- 2. LOAD DATA ---
+# --- 2. LOAD DATA LOKAL (KODE EMITEN) ---
 def load_data_auto():
-    POSSIBLE_FILES = ['Kode Saham.xlsx - Sheet1.csv', 'Kode Saham.xlsx', 'Kode_Saham.xlsx']
+    POSSIBLE_FILES = ['Kode Saham.xlsx', 'Kode_Saham.xlsx', 'Kode Saham.csv']
     for file_name in POSSIBLE_FILES:
         if os.path.exists(file_name):
             try: 
@@ -42,131 +50,90 @@ def load_data_auto():
     return None, None
 
 df_emiten, _ = load_data_auto()
+df_free_float_master = load_free_float_github()
 
-# --- 3. FUNGSI PEWARNAAN ---
-def style_control(val):
-    try:
-        num = float(str(val).replace('%', '').replace(',', '.'))
-        if num > 70: return 'background-color: #ff4b4b; color: white; font-weight: bold'
-        if num > 50: return 'background-color: #ffa500; color: black'
-    except: pass
-    return ''
-
-def style_percentage(val):
-    try:
-        num_val = float(str(val).replace('%', '').replace(',', '.'))
-        if num_val > 0: return 'background-color: rgba(144, 238, 144, 0.4)'
-        elif num_val < 0: return 'background-color: rgba(255, 182, 193, 0.4)'
-        elif num_val == 0: return 'background-color: rgba(255, 255, 0, 0.3)'
-    except: pass
-    return ''
-
-def style_ratio(val):
-    try:
-        num_val = float(str(val).replace(',', '.'))
-        if num_val > 1: return 'background-color: rgba(144, 238, 144, 0.4)'   # hijau
-        elif num_val < 1: return 'background-color: rgba(255, 182, 193, 0.4)' # merah muda
-        elif num_val == 1: return 'background-color: rgba(255, 255, 0, 0.3)' # kuning
-    except: pass
-    return ''
-
-# --- 4. FUNGSI EXPORT EXCEL ---
-def export_to_excel(df_pct, df_prc, df_top=None):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        if df_top is not None and not df_top.empty:
-            df_top.to_excel(writer, index=False, sheet_name='1. Shortlist Terpilih')
-        df_pct.to_excel(writer, index=False, sheet_name='2. Data Persentase')
-        df_prc.to_excel(writer, index=False, sheet_name='3. Data Harga IDR')
-    return output.getvalue()
-
-# --- 5. LOGIKA ANALISA ---
-def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
-    results, shortlist_keys = [], []
+# --- 3. LOGIKA ANALISA ---
+def get_signals_and_data(df_c, df_v, df_ff_ref, is_analisa_lengkap=False):
+    results = []
+    shortlist_keys = []
+    
     for col in df_c.columns:
+        ticker_clean = str(col).replace('.JK','')
         c, v = df_c[col].dropna(), df_v[col].dropna()
         if len(c) < 20: continue
         
-        lookback_12m = c.iloc[-252:] if len(c) >= 252 else c
-        daily_changes = lookback_12m.pct_change() * 100
-        
-        max_daily_gain = daily_changes.max() if not daily_changes.empty else 0
-        count_ara_potential = (daily_changes > 20).sum()
-
+        # Perhitungan Teknis
         v_sma5 = v.rolling(5).mean().iloc[-1]
         v_sma20 = v.rolling(20).mean().iloc[-1]
         v_last = v.iloc[-1]
-
         v_ratio = v_last / v_sma5 if v_sma5 > 0 else 0
         v_ma_ratio = v_sma5 / v_sma20 if v_sma20 > 0 else 0
-
-        chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
-        ticker = str(col).replace('.JK','')
-        
         vol_control_pct = (v_ratio / (v_ratio + 1)) * 100 
+        chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5] if len(c) >= 5 else 0
         
-        ff_pct = None
+        # Ambil Free Float dari Dataframe GitHub
+        ff_val = "N/A"
+        if not df_ff_ref.empty:
+            # Asumsi kolom di Excel GitHub bernama 'Ticker' dan 'Free Float'
+            match = df_ff_ref[df_ff_ref['Ticker'] == ticker_clean]
+            if not match.empty:
+                ff_val = match['Free Float'].values[0]
+
+        status = "Normal"
         if is_analisa_lengkap:
-            ff_pct = get_free_float(col)
-            is_sideways = abs(chg_5d) < 0.02 
-            is_high_control = vol_control_pct > 70 
-            is_low_float = ff_pct is not None and ff_pct < 40 
-            is_liquid = (v_last / 100) > 500   
+            is_sideways = abs(chg_5d) < 0.03
+            is_high_control = vol_control_pct > 65
+            # Syarat Tambahan: Liquiditas (Contoh: Nilai transaksi > 500jt)
+            is_liquid = (v_last * c.iloc[-1]) > 500_000_000 
             
-            status = "Normal"
+            # Logika Akumulasi
             if is_sideways and v_ratio >= 1.2:
                 status = f"💎 Akumulasi (V:{v_ratio:.1f})"
-                if is_high_control and is_low_float and is_liquid:
-                    shortlist_keys.append(ticker)
+                if is_high_control and is_liquid:
+                    shortlist_keys.append(ticker_clean)
             elif chg_5d > 0.05: status = "🚀 Markup"
-        else:
-            status = "N/A"
 
         results.append({
-            'Kode Saham': ticker,
+            'Kode Saham': ticker_clean,
             'Analisa Akumulasi': status,
-            'Max Daily Gain (12M)': f"{max_daily_gain:.1f}%",
-            'Frekuensi >20% (12M)': f"{int(count_ara_potential)}x",
+            'Harga': int(c.iloc[-1]),
             'Vol Control (%)': f"{vol_control_pct:.1f}%",
-            'Free Float (%)': f"{ff_pct:.1f}%" if ff_pct else "N/A",
-            'Rata Lot (5D)': f"{int(v_sma5/100):,}",
-            'Total Lot (Today)': f"{int(v_last/100):,}",
-            'Ratio Vol MA5/MA20': f"{v_ma_ratio:.2f}"
+            'Ratio Vol MA5/MA20': round(v_ma_ratio, 2),
+            'Free Float (%)': f"{ff_val:.2f}%" if isinstance(ff_val, (int, float)) else ff_val,
+            'Total Lot (Today)': f"{int(v_last/100):,}"
         })
+        
     return pd.DataFrame(results), shortlist_keys
 
-# --- 6. RENDER DASHBOARD ---
+# --- 4. RENDER DASHBOARD ---
 if df_emiten is not None:
     st.sidebar.header("Filter & Parameter")
     all_tickers = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
     selected_tickers = st.sidebar.multiselect("Cari Kode:", options=all_tickers)
     
-    min_p = st.sidebar.number_input("Harga Min", value=100)
+    min_p = st.sidebar.number_input("Harga Min", value=50)
     max_p = st.sidebar.number_input("Harga Max", value=10000)
-    start_d = st.sidebar.date_input("Mulai", date(2025, 12, 1))
-    end_d = st.sidebar.date_input("Akhir", date(2025, 12, 17))
+    start_d = st.sidebar.date_input("Mulai", date.today() - timedelta(days=30))
+    end_d = st.sidebar.date_input("Akhir", date.today())
 
-    st.sidebar.markdown("---")
-    btn_split = st.sidebar.button("📊 1. Split View (All Data)")
-    btn_analisa = st.sidebar.button("🚀 2. Jalankan Analisa Lengkap")
-
-    if btn_split or btn_analisa:
-        with st.spinner('Menarik data histori 12 bulan...'):
+    if st.sidebar.button("🚀 Jalankan Analisa"):
+        with st.spinner('Menghubungkan ke GitHub & Yahoo Finance...'):
             df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
             tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].unique()]
+            
             df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
             
             if not df_c_raw.empty:
-                if isinstance(df_c_raw.columns, pd.MultiIndex):
-                    df_c_raw.columns = df_c_raw.columns.get_level_values(1)
-                    df_v_raw.columns = df_v_raw.columns.get_level_values(1)
-
-                df_c_work = df_c_raw.ffill()
-                last_p_val = df_c_work.iloc[-1]
-                saham_lolos = df_c_work.columns if selected_tickers else last_p_val[(last_p_val >= min_p) & (last_p_val <= max_p)].index
+                last_p = df_c_raw.ffill().iloc[-1]
+                saham_lolos = last_p[(last_p >= min_p) & (last_p <= max_p)].index
                 
-                df_f_c, df_f_v = df_c_raw[saham_lolos], df_v_raw[saham_lolos]
-                df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v, is_analisa_lengkap=btn_analisa)
-
-                def prepare_display(df_source, df_analysis_res, is_pct=True):
-                    df_target
+                df_analysis, shortlist = get_signals_and_data(df_c_raw[saham_lolos], df_v_raw[saham_lolos], df_free_float_master, is_analisa_lengkap=True)
+                
+                if shortlist:
+                    st.success(f"🔥 **Shortlist Akumulasi:** {', '.join(shortlist)}")
+                
+                st.dataframe(df_analysis, use_container_width=True)
+            else:
+                st.error("Data tidak ditemukan.")
+else:
+    st.warning("File 'Kode Saham.xlsx' lokal diperlukan untuk list emiten.")
