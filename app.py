@@ -6,8 +6,8 @@ from io import BytesIO
 import requests
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI Ultra v18", layout="wide")
-st.title("🎯 Smart Money Monitor (Gemini Screener 7 + Free Float GitHub)")
+st.set_page_config(page_title="Monitor Saham BEI Ultra v19", layout="wide")
+st.title("🎯 Smart Money Monitor (Gemini Screener 7 + Free Float GitHub, Filter Longgar)")
 
 # --- 1. FITUR CACHE ---
 @st.cache_data(ttl=3600)
@@ -39,7 +39,6 @@ df_emiten, _ = load_data_auto()
 # --- 3. LOAD FREE FLOAT DARI GITHUB ---
 @st.cache_data(ttl=86400)
 def load_free_float_from_github():
-    # Gunakan raw link, bukan blob
     url = "https://raw.githubusercontent.com/Patrickd2503/patricktaslim-stock-app/main/FreeFloat.xlsx"
     try:
         r = requests.get(url, timeout=10)
@@ -60,7 +59,7 @@ def export_to_excel(df_top, df_all):
         df_all.to_excel(writer, index=False, sheet_name='2. Semua Hasil')
     return output.getvalue()
 
-# --- 5. GEMINI SCREENER 7 LOGIC ---
+# --- 5. GEMINI SCREENER 7 LOGIC (Filter Longgar) ---
 def get_signals_and_data(df_c, df_v, df_ff=None):
     results = []
     ff_map = {}
@@ -82,15 +81,15 @@ def get_signals_and_data(df_c, df_v, df_ff=None):
         ticker = col.replace('.JK', '')
         ff_pct = ff_map.get(ticker, None)
 
-        # --- GEMINI SCREENER 7 FILTER ---
+        # --- FILTER LONGGAR ---
         cond_price = price > 50
-        cond_vol = v_ma5 > 50000
-        cond_ma20 = price <= 1.01 * p_ma20
+        cond_vol = v_ma5 > 10000              # turunkan threshold volume
+        cond_ma20 = price <= 1.02 * p_ma20    # longgarkan toleransi ke 2%
         cond_ma50_up = price >= p_ma50
-        cond_ma50_near = price >= 0.98 * p_ma50
+        cond_ma50_near = price >= 0.97 * p_ma50   # longgarkan toleransi ke 97%
         cond_vol_ratio = v_ma5 > v_ma20
-        cond_ff = ff_pct is not None and ff_pct < 40
-        cond_pma5 = p_ma5 < p_ma20
+        cond_ff = ff_pct is not None and ff_pct <= 45   # longgarkan free float ke 45%
+        cond_pma5 = p_ma5 <= p_ma20
 
         if all([cond_price, cond_vol, cond_ma20, cond_ma50_up,
                 cond_ma50_near, cond_vol_ratio, cond_ff, cond_pma5]):
@@ -121,8 +120,8 @@ if df_emiten is not None:
     all_tickers = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
     selected_tickers = st.sidebar.multiselect("Cari Kode:", options=all_tickers)
 
-    start_d = st.sidebar.date_input("Mulai", date(2025, 12, 1))
-    end_d = st.sidebar.date_input("Akhir", date(2025, 12, 31))
+    start_d = st.sidebar.date_input("Mulai", date(2025, 1, 1))   # ambil 1 tahun penuh
+    end_d = st.sidebar.date_input("Akhir", date(2026, 1, 8))
 
     btn_run = st.sidebar.button("🚀 Jalankan Screener Gemini 7")
 
