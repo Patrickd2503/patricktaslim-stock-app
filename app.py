@@ -3,10 +3,11 @@ import yfinance as yf
 import pandas as pd
 from datetime import date, timedelta
 from io import BytesIO
+import requests
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI Ultra v14", layout="wide")
-st.title("🎯 Dashboard Akumulasi: Smart Money Monitor (Gemini Screener 7 + Free Float GitHub)")
+st.set_page_config(page_title="Monitor Saham BEI Ultra v18", layout="wide")
+st.title("🎯 Smart Money Monitor (Gemini Screener 7 + Free Float GitHub)")
 
 # --- 1. FITUR CACHE ---
 @st.cache_data(ttl=3600)
@@ -38,13 +39,14 @@ df_emiten, _ = load_data_auto()
 # --- 3. LOAD FREE FLOAT DARI GITHUB ---
 @st.cache_data(ttl=86400)
 def load_free_float_from_github():
-    # Ganti URL di bawah dengan raw link GitHub kamu
-    url = "https://raw.githubusercontent.com/username/repo/main/FreeFloat.xlsx"
+    # Gunakan raw link, bukan blob
+    url = "https://raw.githubusercontent.com/Patrickd2503/patricktaslim-stock-app/main/FreeFloat.xlsx"
     try:
-        df_ff = pd.read_excel(url)
-        return df_ff
-    except:
-        st.error("Gagal membaca FreeFloat.xlsx dari GitHub. Pastikan URL raw benar.")
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        return pd.read_excel(BytesIO(r.content))
+    except Exception as e:
+        st.error(f"Gagal membaca FreeFloat.xlsx dari GitHub: {e}")
         return None
 
 df_ff = load_free_float_from_github()
@@ -61,6 +63,10 @@ def export_to_excel(df_top, df_all):
 # --- 5. GEMINI SCREENER 7 LOGIC ---
 def get_signals_and_data(df_c, df_v, df_ff=None):
     results = []
+    ff_map = {}
+    if df_ff is not None and {'Kode Saham', 'Free Float (%)'}.issubset(set(df_ff.columns)):
+        ff_map = dict(zip(df_ff['Kode Saham'].astype(str).str.strip(), df_ff['Free Float (%)']))
+
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
         if len(c) < 50:
@@ -74,11 +80,7 @@ def get_signals_and_data(df_c, df_v, df_ff=None):
         p_ma50 = c.rolling(50).mean().iloc[-1]
 
         ticker = col.replace('.JK', '')
-
-        # Ambil free float dari file GitHub
-        ff_pct = None
-        if df_ff is not None and ticker in df_ff['Kode Saham'].values:
-            ff_pct = df_ff.loc[df_ff['Kode Saham'] == ticker, 'Free Float (%)'].values[0]
+        ff_pct = ff_map.get(ticker, None)
 
         # --- GEMINI SCREENER 7 FILTER ---
         cond_price = price > 50
@@ -94,7 +96,6 @@ def get_signals_and_data(df_c, df_v, df_ff=None):
                 cond_ma50_near, cond_vol_ratio, cond_ff, cond_pma5]):
 
             vol_ratio = v_ma5 / v_ma20 if v_ma20 > 0 else 0
-
             results.append({
                 'Kode Saham': ticker,
                 'Harga': round(price, 2),
@@ -104,15 +105,14 @@ def get_signals_and_data(df_c, df_v, df_ff=None):
                 'Price MA20': round(p_ma20, 2),
                 'Price MA50': round(p_ma50, 2),
                 'Price MA5': round(p_ma5, 2),
-                'Free Float (%)': f"{ff_pct:.2f}%" if ff_pct else "N/A"
+                'Free Float (%)': f"{ff_pct:.2f}%" if ff_pct is not None else "N/A"
             })
 
     df_all = pd.DataFrame(results)
+    df_top = pd.DataFrame()
     if not df_all.empty:
         df_all = df_all.sort_values(by='Rasio Vol (MA5/MA20)', ascending=False)
         df_top = df_all.head(5)
-    else:
-        df_top = pd.DataFrame()
     return df_all, df_top
 
 # --- 6. RENDER DASHBOARD ---
@@ -149,7 +149,6 @@ if df_emiten is not None:
                 st.subheader("📈 Semua Saham Lolos Screener")
                 st.dataframe(df_all, use_container_width=True)
 
-                # Tombol Download
                 excel_data = export_to_excel(df_top, df_all)
                 st.download_button(label="📥 Download Hasil ke Excel",
                                    data=excel_data,
