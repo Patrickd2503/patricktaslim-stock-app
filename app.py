@@ -5,13 +5,13 @@ from datetime import date, timedelta
 from io import BytesIO
 import requests
 
-st.set_page_config(page_title="Monitor Saham BEI Ultra v20", layout="wide")
+st.set_page_config(page_title="Monitor Saham BEI Ultra v21", layout="wide")
 st.title("🎯 Smart Money Monitor (Gemini Screener 7 + Free Float GitHub, 1 Tanggal Analisa)")
 
+# --- Fungsi ambil data dari Yahoo Finance ---
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, end_date):
-    # otomatis ambil 1 tahun ke belakang dari end_date
-    start_date = end_date - timedelta(days=365)
+    start_date = end_date - timedelta(days=365)  # otomatis ambil 1 tahun ke belakang
     try:
         df = yf.download(tickers, start=start_date, end=end_date, threads=True, progress=False)
         if df.empty:
@@ -20,6 +20,7 @@ def fetch_yf_all_data(tickers, end_date):
     except:
         return pd.DataFrame(), pd.DataFrame()
 
+# --- Load database emiten ---
 def load_data_auto():
     POSSIBLE_FILES = ['Kode Saham.xlsx - Sheet1.csv', 'Kode Saham.xlsx', 'Kode_Saham.xlsx']
     for file_name in POSSIBLE_FILES:
@@ -34,6 +35,7 @@ def load_data_auto():
 
 df_emiten, _ = load_data_auto()
 
+# --- Load Free Float dari GitHub ---
 @st.cache_data(ttl=86400)
 def load_free_float_from_github():
     url = "https://raw.githubusercontent.com/Patrickd2503/patricktaslim-stock-app/main/FreeFloat.xlsx"
@@ -47,6 +49,7 @@ def load_free_float_from_github():
 
 df_ff = load_free_float_from_github()
 
+# --- Fungsi Screener ---
 def get_signals_and_data(df_c, df_v, df_ff=None):
     results = []
     ff_map = {}
@@ -68,7 +71,7 @@ def get_signals_and_data(df_c, df_v, df_ff=None):
         ticker = col.replace('.JK', '')
         ff_pct = ff_map.get(ticker, None)
 
-        # --- FILTER LONGGAR ---
+        # --- Filter Longgar ---
         cond_price = price > 50
         cond_vol = v_ma5 > 10000
         cond_ma20 = price <= 1.02 * p_ma20
@@ -101,7 +104,17 @@ def get_signals_and_data(df_c, df_v, df_ff=None):
         df_top = df_all.head(5)
     return df_all, df_top
 
-# --- RENDER DASHBOARD ---
+# --- Fungsi Export ke Excel ---
+def export_to_excel(df_top, df_all):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        if df_top is not None and not df_top.empty:
+            df_top.to_excel(writer, index=False, sheet_name='1. Top 5 Shortlist')
+        if df_all is not None and not df_all.empty:
+            df_all.to_excel(writer, index=False, sheet_name='2. Semua Hasil')
+    return output.getvalue()
+
+# --- Render Dashboard ---
 if df_emiten is not None:
     st.sidebar.header("Filter & Parameter")
     all_tickers = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
