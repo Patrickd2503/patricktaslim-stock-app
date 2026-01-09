@@ -11,7 +11,8 @@ st.set_page_config(page_title="Monitor Saham BEI Ultra v11", layout="wide")
 st.markdown("""
     <style>
     .main { background-color: #f5f7f9; }
-    .stNumberInput { margin-bottom: -15px; }
+    /* Memperbaiki jarak antar input box */
+    .stNumberInput { margin-bottom: 5px; } 
     </style>
     """, unsafe_allow_html=True)
 
@@ -38,7 +39,6 @@ def load_free_float_github():
 # --- 2. FETCH DATA MARKET (YFINANCE) ---
 @st.cache_data(ttl=1800)
 def fetch_yf_data(tickers, lookback_days=60):
-    # Analisa selalu menggunakan data terbaru hingga hari ini
     end_date = date.today()
     start_date = end_date - timedelta(days=lookback_days)
     try:
@@ -132,11 +132,11 @@ if df_master_emiten is not None:
     
     st.sidebar.markdown("---")
     
-    # 2. Rentang Harga (Input Box)
-    st.sidebar.label("Rentang Harga (IDR):")
+    # 2. Rentang Harga (Input Box) - Perbaikan st.sidebar.write menggantikan st.sidebar.label
+    st.sidebar.write("**Rentang Harga (IDR):**")
     col_min, col_max = st.sidebar.columns(2)
-    min_p = col_min.number_input("Min", value=50, step=50)
-    max_p = col_max.number_input("Max", value=5000, step=50)
+    min_p = col_min.number_input("Min", value=50, step=50, min_value=0)
+    max_p = col_max.number_input("Max", value=5000, step=50, min_value=0)
     
     st.sidebar.markdown("---")
     
@@ -154,6 +154,9 @@ if df_master_emiten is not None:
                 
                 if not saham_lolos.empty:
                     df_final, top_picks = run_smart_money_analysis(df_c[saham_lolos], df_v[saham_lolos], df_ff_github)
+                    
+                    # Sort agar yang Akumulasi ada di atas
+                    df_final = df_final.sort_values(by='Sinyal', ascending=False)
                     
                     if top_picks:
                         st.success(f"🔥 **Potensi Akumulasi:** {', '.join(top_picks)}")
@@ -180,6 +183,6 @@ if df_master_emiten is not None:
                 else:
                     st.warning("Tidak ada saham ditemukan dalam rentang harga tersebut.")
             else:
-                st.error("Data tidak ditemukan. Pastikan ticker benar atau kurangi jumlah pilihan.")
+                st.error("Data tidak ditemukan. Silakan coba lagi.")
 else:
     st.error("File database emiten ('Kode Saham.xlsx') tidak ditemukan.")
