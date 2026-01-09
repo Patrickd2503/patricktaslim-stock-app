@@ -2,12 +2,11 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import date, timedelta
-import os
 from io import BytesIO
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI Ultra v12", layout="wide")
-st.title("🎯 Dashboard Akumulasi: Smart Money Monitor (Gemini Screener 7)")
+st.set_page_config(page_title="Monitor Saham BEI Ultra v14", layout="wide")
+st.title("🎯 Dashboard Akumulasi: Smart Money Monitor (Gemini Screener 7 + Free Float GitHub)")
 
 # --- 1. FITUR CACHE ---
 @st.cache_data(ttl=3600)
@@ -21,32 +20,36 @@ def fetch_yf_all_data(tickers, start_date, end_date):
     except:
         return pd.DataFrame(), pd.DataFrame()
 
-@st.cache_data(ttl=86400)
-def get_free_float(ticker_jk):
-    try:
-        info = yf.Ticker(ticker_jk).info
-        f_shares = info.get('floatShares')
-        total_s = info.get('sharesOutstanding')
-        if f_shares and total_s:
-            return (f_shares / total_s) * 100
-    except:
-        pass
-    return None
-
-# --- 2. LOAD DATA ---
+# --- 2. LOAD DATA EMITEN ---
 def load_data_auto():
     POSSIBLE_FILES = ['Kode Saham.xlsx - Sheet1.csv', 'Kode Saham.xlsx', 'Kode_Saham.xlsx']
     for file_name in POSSIBLE_FILES:
-        if os.path.exists(file_name):
-            try:
-                return (pd.read_csv(file_name) if file_name.endswith('.csv') else pd.read_excel(file_name)), file_name
-            except:
-                continue
+        try:
+            if file_name.endswith('.csv'):
+                return pd.read_csv(file_name), file_name
+            else:
+                return pd.read_excel(file_name), file_name
+        except:
+            continue
     return None, None
 
 df_emiten, _ = load_data_auto()
 
-# --- 3. FUNGSI EXPORT EXCEL ---
+# --- 3. LOAD FREE FLOAT DARI GITHUB ---
+@st.cache_data(ttl=86400)
+def load_free_float_from_github():
+    # Ganti URL di bawah dengan raw link GitHub kamu
+    url = "https://raw.githubusercontent.com/username/repo/main/FreeFloat.xlsx"
+    try:
+        df_ff = pd.read_excel(url)
+        return df_ff
+    except:
+        st.error("Gagal membaca FreeFloat.xlsx dari GitHub. Pastikan URL raw benar.")
+        return None
+
+df_ff = load_free_float_from_github()
+
+# --- 4. EXPORT EXCEL ---
 def export_to_excel(df_top, df_all):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -55,23 +58,27 @@ def export_to_excel(df_top, df_all):
         df_all.to_excel(writer, index=False, sheet_name='2. Semua Hasil')
     return output.getvalue()
 
-# --- 4. GEMINI SCREENER 7 LOGIC ---
-def get_signals_and_data(df_c, df_v):
+# --- 5. GEMINI SCREENER 7 LOGIC ---
+def get_signals_and_data(df_c, df_v, df_ff=None):
     results = []
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
-        if len(c) < 50:  # butuh minimal 50 hari data
+        if len(c) < 50:
             continue
 
         price = c.iloc[-1]
-        v_last = v.iloc[-1]
         v_ma5 = v.rolling(5).mean().iloc[-1]
         v_ma20 = v.rolling(20).mean().iloc[-1]
         p_ma5 = c.rolling(5).mean().iloc[-1]
         p_ma20 = c.rolling(20).mean().iloc[-1]
         p_ma50 = c.rolling(50).mean().iloc[-1]
 
-        ff_pct = get_free_float(col)
+        ticker = col.replace('.JK', '')
+
+        # Ambil free float dari file GitHub
+        ff_pct = None
+        if df_ff is not None and ticker in df_ff['Kode Saham'].values:
+            ff_pct = df_ff.loc[df_ff['Kode Saham'] == ticker, 'Free Float (%)'].values[0]
 
         # --- GEMINI SCREENER 7 FILTER ---
         cond_price = price > 50
@@ -86,7 +93,6 @@ def get_signals_and_data(df_c, df_v):
         if all([cond_price, cond_vol, cond_ma20, cond_ma50_up,
                 cond_ma50_near, cond_vol_ratio, cond_ff, cond_pma5]):
 
-            ticker = col.replace('.JK', '')
             vol_ratio = v_ma5 / v_ma20 if v_ma20 > 0 else 0
 
             results.append({
@@ -109,7 +115,7 @@ def get_signals_and_data(df_c, df_v):
         df_top = pd.DataFrame()
     return df_all, df_top
 
-# --- 5. RENDER DASHBOARD ---
+# --- 6. RENDER DASHBOARD ---
 if df_emiten is not None:
     st.sidebar.header("Filter & Parameter")
     all_tickers = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
@@ -131,7 +137,7 @@ if df_emiten is not None:
                     df_c_raw.columns = df_c_raw.columns.get_level_values(1)
                     df_v_raw.columns = df_v_raw.columns.get_level_values(1)
 
-                df_all, df_top = get_signals_and_data(df_c_raw, df_v_raw)
+                df_all, df_top = get_signals_and_data(df_c_raw, df_v_raw, df_ff)
 
                 st.subheader("🎯 Top 5 Saham (Rasio Volume Tertinggi)")
                 if not df_top.empty:
