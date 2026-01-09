@@ -5,23 +5,21 @@ from datetime import date, timedelta
 from io import BytesIO
 import requests
 
-# --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI Ultra v19", layout="wide")
-st.title("🎯 Smart Money Monitor (Gemini Screener 7 + Free Float GitHub, Filter Longgar)")
+st.set_page_config(page_title="Monitor Saham BEI Ultra v20", layout="wide")
+st.title("🎯 Smart Money Monitor (Gemini Screener 7 + Free Float GitHub, 1 Tanggal Analisa)")
 
-# --- 1. FITUR CACHE ---
 @st.cache_data(ttl=3600)
-def fetch_yf_all_data(tickers, start_date, end_date):
-    extended_start = start_date - timedelta(days=365)
+def fetch_yf_all_data(tickers, end_date):
+    # otomatis ambil 1 tahun ke belakang dari end_date
+    start_date = end_date - timedelta(days=365)
     try:
-        df = yf.download(tickers, start=extended_start, end=end_date, threads=True, progress=False)
+        df = yf.download(tickers, start=start_date, end=end_date, threads=True, progress=False)
         if df.empty:
             return pd.DataFrame(), pd.DataFrame()
         return df['Close'], df['Volume']
     except:
         return pd.DataFrame(), pd.DataFrame()
 
-# --- 2. LOAD DATA EMITEN ---
 def load_data_auto():
     POSSIBLE_FILES = ['Kode Saham.xlsx - Sheet1.csv', 'Kode Saham.xlsx', 'Kode_Saham.xlsx']
     for file_name in POSSIBLE_FILES:
@@ -36,7 +34,6 @@ def load_data_auto():
 
 df_emiten, _ = load_data_auto()
 
-# --- 3. LOAD FREE FLOAT DARI GITHUB ---
 @st.cache_data(ttl=86400)
 def load_free_float_from_github():
     url = "https://raw.githubusercontent.com/Patrickd2503/patricktaslim-stock-app/main/FreeFloat.xlsx"
@@ -50,16 +47,6 @@ def load_free_float_from_github():
 
 df_ff = load_free_float_from_github()
 
-# --- 4. EXPORT EXCEL ---
-def export_to_excel(df_top, df_all):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        if df_top is not None and not df_top.empty:
-            df_top.to_excel(writer, index=False, sheet_name='1. Top 5 Shortlist')
-        df_all.to_excel(writer, index=False, sheet_name='2. Semua Hasil')
-    return output.getvalue()
-
-# --- 5. GEMINI SCREENER 7 LOGIC (Filter Longgar) ---
 def get_signals_and_data(df_c, df_v, df_ff=None):
     results = []
     ff_map = {}
@@ -83,12 +70,12 @@ def get_signals_and_data(df_c, df_v, df_ff=None):
 
         # --- FILTER LONGGAR ---
         cond_price = price > 50
-        cond_vol = v_ma5 > 10000              # turunkan threshold volume
-        cond_ma20 = price <= 1.02 * p_ma20    # longgarkan toleransi ke 2%
+        cond_vol = v_ma5 > 10000
+        cond_ma20 = price <= 1.02 * p_ma20
         cond_ma50_up = price >= p_ma50
-        cond_ma50_near = price >= 0.97 * p_ma50   # longgarkan toleransi ke 97%
+        cond_ma50_near = price >= 0.97 * p_ma50
         cond_vol_ratio = v_ma5 > v_ma20
-        cond_ff = ff_pct is not None and ff_pct <= 45   # longgarkan free float ke 45%
+        cond_ff = ff_pct is not None and ff_pct <= 45
         cond_pma5 = p_ma5 <= p_ma20
 
         if all([cond_price, cond_vol, cond_ma20, cond_ma50_up,
@@ -114,14 +101,14 @@ def get_signals_and_data(df_c, df_v, df_ff=None):
         df_top = df_all.head(5)
     return df_all, df_top
 
-# --- 6. RENDER DASHBOARD ---
+# --- RENDER DASHBOARD ---
 if df_emiten is not None:
     st.sidebar.header("Filter & Parameter")
     all_tickers = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
     selected_tickers = st.sidebar.multiselect("Cari Kode:", options=all_tickers)
 
-    start_d = st.sidebar.date_input("Mulai", date(2025, 1, 1))   # ambil 1 tahun penuh
-    end_d = st.sidebar.date_input("Akhir", date(2026, 1, 8))
+    # hanya pilih tanggal analisa
+    end_d = st.sidebar.date_input("Tanggal Analisa", date.today())
 
     btn_run = st.sidebar.button("🚀 Jalankan Screener Gemini 7")
 
@@ -129,7 +116,7 @@ if df_emiten is not None:
         with st.spinner('Menarik data histori...'):
             df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
             tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].unique()]
-            df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
+            df_c_raw, df_v_raw = fetch_yf_all_data(tuple(tickers_jk), end_d)
 
             if not df_c_raw.empty:
                 if isinstance(df_c_raw.columns, pd.MultiIndex):
