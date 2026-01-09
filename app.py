@@ -12,7 +12,6 @@ st.title("🎯 Dashboard Akumulasi: Smart Money Monitor")
 # --- 1. FITUR CACHE ---
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
-    # Buffer data 12 bulan (365 hari) ke belakang untuk analisa histori ARA
     extended_start = start_date - timedelta(days=365)
     try:
         df = yf.download(tickers, start=extended_start, end=end_date, threads=True, progress=False)
@@ -62,6 +61,15 @@ def style_percentage(val):
     except: pass
     return ''
 
+def style_ratio(val):
+    try:
+        num_val = float(str(val).replace(',', '.'))
+        if num_val > 1: return 'background-color: rgba(144, 238, 144, 0.4)'   # hijau
+        elif num_val < 1: return 'background-color: rgba(255, 182, 193, 0.4)' # merah muda
+        elif num_val == 1: return 'background-color: rgba(255, 255, 0, 0.3)' # kuning
+    except: pass
+    return ''
+
 # --- 4. FUNGSI EXPORT EXCEL ---
 def export_to_excel(df_pct, df_prc, df_top=None):
     output = BytesIO()
@@ -72,26 +80,26 @@ def export_to_excel(df_pct, df_prc, df_top=None):
         df_prc.to_excel(writer, index=False, sheet_name='3. Data Harga IDR')
     return output.getvalue()
 
-# --- 5. LOGIKA ANALISA (Update: Histori 12 Bulan & Hitung ARA) ---
+# --- 5. LOGIKA ANALISA ---
 def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
     results, shortlist_keys = [], []
     for col in df_c.columns:
         c, v = df_c[col].dropna(), df_v[col].dropna()
-        if len(c) < 6: continue
+        if len(c) < 20: continue
         
-        # Analisa Histori 12 Bulan (Data bursa +/- 252 hari)
         lookback_12m = c.iloc[-252:] if len(c) >= 252 else c
         daily_changes = lookback_12m.pct_change() * 100
         
-        # 1. Kenaikan harian tertinggi dalam 12 bulan
         max_daily_gain = daily_changes.max() if not daily_changes.empty else 0
-        
-        # 2. Hitung berapa kali gain > 20% (Potensi ARA)
         count_ara_potential = (daily_changes > 20).sum()
 
         v_sma5 = v.rolling(5).mean().iloc[-1]
+        v_sma20 = v.rolling(20).mean().iloc[-1]
         v_last = v.iloc[-1]
+
         v_ratio = v_last / v_sma5 if v_sma5 > 0 else 0
+        v_ma_ratio = v_sma5 / v_sma20 if v_sma20 > 0 else 0
+
         chg_5d = (c.iloc[-1] - c.iloc[-5]) / c.iloc[-5]
         ticker = str(col).replace('.JK','')
         
@@ -122,7 +130,8 @@ def get_signals_and_data(df_c, df_v, is_analisa_lengkap=False):
             'Vol Control (%)': f"{vol_control_pct:.1f}%",
             'Free Float (%)': f"{ff_pct:.1f}%" if ff_pct else "N/A",
             'Rata Lot (5D)': f"{int(v_sma5/100):,}",
-            'Total Lot (Today)': f"{int(v_last/100):,}"
+            'Total Lot (Today)': f"{int(v_last/100):,}",
+            'Ratio Vol MA5/MA20': f"{v_ma_ratio:.2f}"
         })
     return pd.DataFrame(results), shortlist_keys
 
@@ -160,39 +169,4 @@ if df_emiten is not None:
                 df_analysis, shortlist_keys = get_signals_and_data(df_f_c, df_f_v, is_analisa_lengkap=btn_analisa)
 
                 def prepare_display(df_source, df_analysis_res, is_pct=True):
-                    df_target = df_source.loc[pd.to_datetime(start_d):pd.to_datetime(end_d)].ffill()
-                    df_val = (df_target.pct_change() * 100).applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "0.0%") if is_pct else df_target.applymap(lambda x: int(x) if pd.notnull(x) else 0)
-                    df_val.index = df_val.index.strftime('%d/%m/%Y')
-                    df_t = df_val.T
-                    df_t.index = df_t.index.str.replace('.JK', '', regex=False)
-                    m = pd.merge(df_emiten[['Kode Saham', 'Nama Perusahaan']], df_t, left_on='Kode Saham', right_index=True)
-                    m = pd.merge(m, df_analysis_res, on='Kode Saham', how='left')
-                    cols = list(m.columns)
-                    # Metadata (Kolom Identitas + 7 Kolom Analisa Baru)
-                    return m[[cols[0], cols[1], cols[-7], cols[-6], cols[-5], cols[-4], cols[-3], cols[-2], cols[-1]] + cols[2:-7]]
-
-                df_all_pct = prepare_display(df_f_c, df_analysis, is_pct=True)
-                df_all_prc = prepare_display(df_f_c, df_analysis, is_pct=False)
-
-                # Tombol Download
-                excel_data = export_to_excel(df_all_pct, df_all_prc, df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)])
-                st.download_button(label="📥 Download Hasil ke Excel", data=excel_data, file_name=f"Analisa_ARA_Histori_{end_d}.xlsx")
-
-                if btn_split:
-                    st.subheader("📈 Tabel 1: Persentase Perubahan Harian (%)")
-                    st.dataframe(df_all_pct.style.applymap(style_percentage, subset=df_all_pct.columns[9:]), use_container_width=True)
-                    st.subheader("💰 Tabel 2: Harga Nominal Harian (IDR)")
-                    st.dataframe(df_all_prc, use_container_width=True)
-
-                elif btn_analisa:
-                    st.subheader("🎯 Shortlist Terpilih")
-                    df_top = df_all_pct[df_all_pct['Kode Saham'].isin(shortlist_keys)]
-                    if not df_top.empty:
-                        st.dataframe(df_top.style.applymap(style_control, subset=['Vol Control (%)']).applymap(style_percentage, subset=df_top.columns[9:]), use_container_width=True)
-                    else:
-                        st.info("Tidak ada saham yang memenuhi kriteria akumulasi khusus.")
-                    st.divider()
-                    st.subheader("📈 Tabel Lengkap")
-                    st.dataframe(df_all_pct.style.applymap(style_control, subset=['Vol Control (%)']).applymap(style_percentage, subset=df_all_pct.columns[9:]), use_container_width=True)
-else:
-    st.error("Database tidak ditemukan.")
+                    df_target
