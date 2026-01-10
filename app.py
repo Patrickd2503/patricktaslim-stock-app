@@ -13,23 +13,51 @@ st.title("🎯 Dashboard Akumulasi: Smart Money Monitor")
 # --- 1. FITUR CACHE ---
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
-    # Ambil data IHSG sebagai benchmark (^JKSE)
     all_tickers = list(tickers) + ["^JKSE"]
-    extended_start = start_date - timedelta(days=450) # Buffer untuk MA200 & MFI
+    extended_start = start_date - timedelta(days=450) 
     try:
         df = yf.download(all_tickers, start=extended_start, end=end_date, threads=True, progress=False)
         if df.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-        return df['Close'], df['Volume'], df['High'], df['Low']
-    except:
+        # Menangani struktur data yfinance yang bisa berubah (MultiIndex)
+        close = df['Close']
+        volume = df['Volume']
+        high = df['High']
+        low = df['Low']
+        return close, volume, high, low
+    except Exception as e:
+        st.error(f"Error download data: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+# --- 2. LOAD DATA ---
+def load_data_auto():
+    # Menambahkan list file yang mungkin ada
+    POSSIBLE_FILES = ['Kode Saham.xlsx', 'Kode_Saham.xlsx', 'Kode Saham.xlsx - Sheet1.csv', 'data.csv']
+    for file_name in POSSIBLE_FILES:
+        if os.path.exists(file_name):
+            try: 
+                df = pd.read_csv(file_name) if file_name.endswith('.csv') else pd.read_excel(file_name)
+                # Pastikan kolom 'Kode Saham' ada
+                if 'Kode Saham' in df.columns:
+                    return df, file_name
+            except: continue
+    
+    # JIKA FILE TIDAK DITEMUKAN, PAKAI DATA DEFAULT (Contoh Top 10 BEI)
+    default_data = pd.DataFrame({
+        'Kode Saham': ['BBCA', 'BBRI', 'TLKM', 'BMRI', 'ASII', 'GOTO', 'BUMI', 'GIAA', 'BIPI', 'ANTM'],
+        'Nama Perusahaan': ['Bank BCA', 'Bank BRI', 'Telkom', 'Bank Mandiri', 'Astra', 'Goto', 'Bumi Resources', 'Garuda', 'Astrindo', 'Antam']
+    })
+    return default_data, "Default (File Not Found)"
+
+# Inisialisasi df_emiten di awal agar NameError hilang
+df_emiten, loaded_file = load_data_auto()
 
 # --- 3. FUNGSI PEWARNAAN ---
 def style_mfi(val):
     try:
         num = float(val)
         if num >= 80: return 'background-color: #ff4b4b; color: white' 
-        if num <= 30: return 'background-color: #008000; color: white' 
+        if num <= 35: return 'background-color: #008000; color: white' 
     except: pass
     return ''
 
@@ -38,85 +66,90 @@ def style_trend(val):
     if val == "Dibawah MA20": return 'color: #ff4b4b'
     return ''
 
-# --- 5. LOGIKA ANALISA (Update: MA20 & Relative Strength) ---
+# --- 4. LOGIKA ANALISA ---
 def get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=False):
     results, shortlist_keys = [], []
     
-    # Ambil data IHSG untuk Relative Strength
-    ihsg_c = df_c['^JKSE'].dropna()
-    ihsg_perf = (ihsg_c.iloc[-1] - ihsg_c.iloc[-20]) / ihsg_c.iloc[-20] if len(ihsg_c) > 20 else 0
+    # Cek IHSG
+    if "^JKSE" in df_c.columns:
+        ihsg_c = df_c["^JKSE"].dropna()
+        ihsg_perf = (ihsg_c.iloc[-1] - ihsg_c.iloc[-20]) / ihsg_c.iloc[-20] if len(ihsg_c) >= 20 else 0
+    else:
+        ihsg_perf = 0
 
     for col in df_c.columns:
-        if col == "^JKSE": continue
+        if col == "^JKSE" or col == "": continue
         
         c, v, h, l = df_c[col].dropna(), df_v[col].dropna(), df_h[col].dropna(), df_l[col].dropna()
-        if len(c) < 30: continue
+        if len(c) < 25: continue
         
-        # --- [A] MONEY FLOW INDEX (MFI) ---
-        typical_price = (h + l + c) / 3
-        money_flow = typical_price * v
-        pos_flow = (money_flow.where(typical_price > typical_price.shift(1), 0)).rolling(14).sum()
-        neg_flow = (money_flow.where(typical_price < typical_price.shift(1), 0)).rolling(14).sum()
-        mfi = 100 - (100 / (1 + (pos_flow / neg_flow)))
-        last_mfi = mfi.iloc[-1] if not mfi.isna().iloc[-1] else 50
+        # MFI
+        tp = (h + l + c) / 3
+        mf = tp * v
+        pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
+        neg_mf = (mf.where(tp < tp.shift(1), 0)).rolling(14).sum()
+        mfi_series = 100 - (100 / (1 + (pos_mf / neg_mf)))
+        last_mfi = mfi_series.iloc[-1] if not np.isnan(mfi_series.iloc[-1]) else 50
 
-        # --- [B] MA20 TREND ANALYSIS ---
+        # Trend & PVA
         ma20 = c.rolling(20).mean().iloc[-1]
-        last_price = c.iloc[-1]
-        trend_status = "Diatas MA20" if last_price > ma20 else "Dibawah MA20"
-
-        # --- [C] RELATIVE STRENGTH (RS) ---
-        stock_perf = (c.iloc[-1] - c.iloc[-20]) / c.iloc[-20]
-        # Jika performa saham > performa IHSG dlm 20 hari terakhir
-        rs_status = "Outperform" if stock_perf > ihsg_perf else "Underperform"
-
-        # --- [D] PRICE VOLUME ANALYSIS (PVA) ---
+        last_p = c.iloc[-1]
         v_sma20 = v.rolling(20).mean().iloc[-1]
-        v_last = v.iloc[-1]
         p_change = ((c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]) * 100
         
-        pva_status = "Neutral"
-        if p_change > 1 and v_last > v_sma20: pva_status = "Bullish Vol"
-        elif p_change < -1 and v_last > v_sma20: pva_status = "Bearish Vol"
-        elif abs(p_change) < 1 and v_last > v_sma20: pva_status = "Churning"
+        trend = "Diatas MA20" if last_p > ma20 else "Dibawah MA20"
+        
+        pva = "Neutral"
+        if p_change > 1 and v.iloc[-1] > v_sma20: pva = "Bullish Vol"
+        elif p_change < -1 and v.iloc[-1] > v_sma20: pva = "Bearish Vol"
+        elif abs(p_change) < 1 and v.iloc[-1] > v_sma20: pva = "Churning"
 
-        # --- [E] SHORT SWING SHORTLIST LOGIC ---
-        # Kriteria: Akumulasi + Trend Naik + MFI belum panas + Lebih kuat dari Market
+        # RS
+        s_perf = (c.iloc[-1] - c.iloc[-20]) / c.iloc[-20] if len(c) >= 20 else 0
+        rs = "Outperform" if s_perf > ihsg_perf else "Underperform"
+
+        # Shortlist Logic: Entry Jam 10:30 (Swing 2 Minggu)
         if is_analisa_lengkap:
-            if pva_status == "Bullish Vol" and last_mfi < 50 and trend_status == "Diatas MA20":
+            if pva == "Bullish Vol" and last_mfi < 55 and trend == "Diatas MA20":
                 shortlist_keys.append(str(col).replace('.JK',''))
 
         results.append({
             'Kode Saham': str(col).replace('.JK',''),
-            'Tren (MA20)': trend_status,
+            'Tren (MA20)': trend,
             'MFI (14D)': round(last_mfi, 1),
-            'PVA': pva_status,
-            'Market RS': rs_status,
-            'Price': int(last_price),
-            'Vol/SMA20': round(v_last / v_sma20, 2) if v_sma20 > 0 else 0
+            'PVA': pva,
+            'Market RS': rs,
+            'Last Price': int(last_p),
+            'Vol/SMA20': round(v.iloc[-1] / v_sma20, 2) if v_sma20 > 0 else 0
         })
     return pd.DataFrame(results), shortlist_keys
 
-# --- 6. RENDER DASHBOARD ---
-if df_emiten is not None:
+# --- 5. RENDER DASHBOARD ---
+st.sidebar.info(f"File Terdeteksi: {loaded_file}")
+
+if not df_emiten.empty:
     st.sidebar.header("Filter & Parameter")
     all_tickers = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
-    selected_tickers = st.sidebar.multiselect("Cari Kode:", options=all_tickers)
+    selected_tickers = st.sidebar.multiselect("Cari Kode (Kosongkan untuk semua):", options=all_tickers)
     
-    min_p = st.sidebar.number_input("Harga Min", value=100)
-    max_p = st.sidebar.number_input("Harga Max", value=10000)
-    start_d = st.sidebar.date_input("Mulai", date(2026, 1, 5)) 
+    min_p = st.sidebar.number_input("Harga Min", value=50)
+    max_p = st.sidebar.number_input("Harga Max", value=20000)
+    
+    # Default ke Jan 2026 sesuai skenario user
+    start_d = st.sidebar.date_input("Mulai", date(2026, 1, 5))
     end_d = st.sidebar.date_input("Akhir", date(2026, 1, 10))
 
-    btn_analisa = st.sidebar.button("🚀 Jalankan Analisa Swing")
+    btn_analisa = st.sidebar.button("🚀 Jalankan Analisa Jam 10:30")
 
     if btn_analisa:
-        with st.spinner('Menganalisa Tren & Money Flow...'):
-            df_to_f = df_emiten[df_emiten['Kode Saham'].isin(selected_tickers)] if selected_tickers else df_emiten
-            tickers_jk = [str(k).strip() + ".JK" for k in df_to_f['Kode Saham'].unique()]
+        with st.spinner('Menganalisa data market...'):
+            target_list = selected_tickers if selected_tickers else all_tickers
+            tickers_jk = [str(k).strip() + ".JK" for k in target_list]
+            
             df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
             
             if not df_c.empty:
+                # Membersihkan kolom jika MultiIndex
                 if isinstance(df_c.columns, pd.MultiIndex):
                     df_c.columns = df_c.columns.get_level_values(1)
                     df_v.columns = df_v.columns.get_level_values(1)
@@ -125,27 +158,25 @@ if df_emiten is not None:
 
                 df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=True)
                 
-                # Final Filtering
-                df_analysis = df_analysis[(df_analysis['Price'] >= min_p) & (df_analysis['Price'] <= max_p)]
+                # Filter Harga
+                df_analysis = df_analysis[(df_analysis['Last Price'] >= min_p) & (df_analysis['Last Price'] <= max_p)]
 
-                st.subheader("🏁 Rekomendasi Short Swing (2 Minggu)")
-                
-                # TAMPILAN SHORTLIST
-                st.write("### 💎 Golden Setup (MA20 Up + MFI < 50 + Bullish PVA)")
+                # TABEL 1: SHORTLIST
+                st.subheader("💎 Golden Setup untuk Senin (Entry Jam 10:30)")
                 df_top = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)].sort_values(by='MFI (14D)')
                 
                 if not df_top.empty:
+                    st.success(f"Ditemukan {len(df_top)} saham untuk Swing 2 Minggu.")
                     st.dataframe(df_top.style.applymap(style_mfi, subset=['MFI (14D)'])
-                                         .applymap(style_trend, subset=['Tren (MA20)']), 
-                                 use_container_width=True)
-                    st.success(f"Ditemukan {len(df_top)} saham potensial. Fokus pada yang 'Outperform' terhadap Market.")
+                                         .applymap(style_trend, subset=['Tren (MA20)']), use_container_width=True)
                 else:
-                    st.warning("Belum ada saham memenuhi kriteria Golden Setup. Coba cek tabel di bawah untuk spekulasi MFI rendah.")
-                
+                    st.warning("Tidak ada saham memenuhi syarat ketat (MA20 + MFI < 55). Cek tabel monitor di bawah.")
+
                 st.divider()
-                st.write("### 📊 Monitor Seluruh Emiten")
+                st.write("### 📊 Monitor Arus Uang (MFI & PVA)")
                 st.dataframe(df_analysis.style.applymap(style_mfi, subset=['MFI (14D)'])
-                                         .applymap(style_trend, subset=['Tren (MA20)']), 
-                             use_container_width=True)
+                                         .applymap(style_trend, subset=['Tren (MA20)']), use_container_width=True)
+            else:
+                st.error("Data gagal diambil dari Yahoo Finance. Cek koneksi atau simbol saham.")
 else:
-    st.error("Database tidak ditemukan.")
+    st.error("Gagal memuat data emiten. Pastikan file 'Kode Saham.xlsx' sudah di-upload.")
