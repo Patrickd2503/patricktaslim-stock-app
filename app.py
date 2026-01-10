@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import date, timedelta
 import os
-from io import BytesIO  # Untuk memproses download file di memori
+from io import BytesIO
 
 # --- CONFIG DASHBOARD ---
 st.set_page_config(page_title="Monitor Saham BEI Ultra v11", layout="wide")
@@ -34,13 +34,12 @@ def load_data_auto():
                 if 'Kode Saham' in df.columns:
                     return df, file_name
             except: continue
-    
     default_data = pd.DataFrame({'Kode Saham': ['WINS', 'CNKO', 'KOIN', 'STRK', 'KAEF', 'ICON', 'SPRE', 'LIVE', 'VIVA', 'BUMI', 'GOTO']})
     return default_data, "Default Mode (File Not Found)"
 
 df_emiten, loaded_file = load_data_auto()
 
-# --- 3. FUNGSI STYLING & EXCEL ---
+# --- 3. FUNGSI STYLING & MULTI-SHEET EXCEL ---
 def style_mfi(val):
     try:
         num = float(val)
@@ -52,11 +51,12 @@ def style_mfi(val):
 def highlight_outperform(row):
     return ['background-color: #1e3d59; color: white' if row['Market RS'] == 'Outperform' else '' for _ in row]
 
-def to_excel(df):
+def to_excel_multi_sheet(df_shortlist, df_all):
     output = BytesIO()
-    writer = pd.ExcelWriter(output, engine='xlsxwriter')
-    df.to_excel(writer, index=False, sheet_name='GoldenSetup')
-    writer.close()
+    # Menggunakan engine xlsxwriter untuk membuat multiple sheets
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_shortlist.to_excel(writer, index=False, sheet_name='Shortlist')
+        df_all.to_excel(writer, index=False, sheet_name='All_Data')
     processed_data = output.getvalue()
     return processed_data
 
@@ -134,23 +134,31 @@ if not df_emiten.empty:
                 df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=True)
                 df_analysis = df_analysis[(df_analysis['Last Price'] >= min_p) & (df_analysis['Last Price'] <= max_p)]
 
-                # --- BAGIAN 1: GOLDEN SETUP ---
-                st.subheader("💎 Golden Setup (Rekomendasi Entry Jam 10:30)")
+                # Persiapkan data untuk download
                 df_top = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)].sort_values(by='MFI (14D)')
                 
+                # TOMBOL DOWNLOAD (Terletak di atas agar mudah ditemukan)
+                if not df_analysis.empty:
+                    excel_file = to_excel_multi_sheet(df_top, df_analysis)
+                    st.download_button(
+                        label="📥 Download Hasil Analisa (2 Sheets)",
+                        data=excel_file,
+                        file_name=f'Analisa_Saham_{date.today()}.xlsx',
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                    )
+
+                # --- TAMPILAN TABEL 1: GOLDEN SETUP ---
+                st.subheader("💎 Golden Setup (Rekomendasi Entry Jam 10:30)")
                 if not df_top.empty:
-                    # TOMBOL DOWNLOAD EXCEL
-                    df_excel = df_top.copy()
-                    excel_data = to_excel(df_excel)
-                    st.download_button(label="📥 Download Shortlist to Excel", data=excel_data, file_name=f'Golden_Setup_{date.today()}.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-                    
                     st.dataframe(df_top.style.apply(highlight_outperform, axis=1)
                                     .applymap(style_mfi, subset=['MFI (14D)'])
                                     .format({"MFI (14D)": "{:.1f}", "Vol/SMA20": "{:.2f}"}), use_container_width=True)
                 else:
-                    st.warning("Belum ada saham yang memenuhi syarat hari ini.")
+                    st.warning("Belum ada saham yang memenuhi syarat ketat hari ini.")
 
                 st.divider()
+                
+                # --- TAMPILAN TABEL 2: SEMUA DATA ---
                 st.write("### 📊 Monitor Seluruh Emiten")
                 st.dataframe(df_analysis.style.applymap(style_mfi, subset=['MFI (14D)']).format({"MFI (14D)": "{:.1f}", "Vol/SMA20": "{:.2f}"}), use_container_width=True)
             else:
