@@ -39,7 +39,7 @@ def load_data_auto():
 
 df_emiten, loaded_file = load_data_auto()
 
-# --- 3. FUNGSI STYLING & MULTI-SHEET EXCEL ---
+# --- 3. FUNGSI STYLING & EXCEL ---
 def style_mfi(val):
     try:
         num = float(val)
@@ -51,14 +51,22 @@ def style_mfi(val):
 def highlight_outperform(row):
     return ['background-color: #1e3d59; color: white' if row['Market RS'] == 'Outperform' else '' for _ in row]
 
-def to_excel_multi_sheet(df_shortlist, df_all):
+def style_percentage(val):
+    try:
+        num_val = float(str(val).replace('%', ''))
+        if num_val > 0: return 'background-color: rgba(144, 238, 144, 0.4)'
+        elif num_val < 0: return 'background-color: rgba(255, 182, 193, 0.4)'
+    except: pass
+    return ''
+
+def to_excel_multi_sheet(df_shortlist, df_all, df_pct, df_prc):
     output = BytesIO()
-    # Menggunakan engine xlsxwriter untuk membuat multiple sheets
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_shortlist.to_excel(writer, index=False, sheet_name='Shortlist')
-        df_all.to_excel(writer, index=False, sheet_name='All_Data')
-    processed_data = output.getvalue()
-    return processed_data
+        df_shortlist.to_excel(writer, index=False, sheet_name='1. Shortlist')
+        df_all.to_excel(writer, index=False, sheet_name='2. Analisa Utama')
+        df_pct.to_excel(writer, index=True, sheet_name='3. Histori %')
+        df_prc.to_excel(writer, index=True, sheet_name='4. Histori Harga')
+    return output.getvalue()
 
 # --- 4. LOGIKA ANALISA TEKNIKAL ---
 def get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=False):
@@ -118,7 +126,11 @@ if not df_emiten.empty:
     min_p = st.sidebar.number_input("Harga Min", value=50); max_p = st.sidebar.number_input("Harga Max", value=20000)
     start_d = st.sidebar.date_input("Mulai", date(2026, 1, 5)); end_d = st.sidebar.date_input("Akhir", date(2026, 1, 10))
 
-    if st.sidebar.button("🚀 Jalankan Analisa"):
+    st.sidebar.markdown("---")
+    show_split = st.sidebar.checkbox("📊 Aktifkan Split View (Histori)")
+    btn_analisa = st.sidebar.button("🚀 Jalankan Analisa Lengkap")
+
+    if btn_analisa:
         with st.spinner('Memproses data market...'):
             target_list = selected_tickers if selected_tickers else all_tickers
             tickers_jk = [str(k).strip() + ".JK" for k in target_list]
@@ -133,32 +145,39 @@ if not df_emiten.empty:
 
                 df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=True)
                 df_analysis = df_analysis[(df_analysis['Last Price'] >= min_p) & (df_analysis['Last Price'] <= max_p)]
-
-                # Persiapkan data untuk download
                 df_top = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)].sort_values(by='MFI (14D)')
-                
-                # TOMBOL DOWNLOAD (Terletak di atas agar mudah ditemukan)
-                if not df_analysis.empty:
-                    excel_file = to_excel_multi_sheet(df_top, df_analysis)
-                    st.download_button(
-                        label="📥 Download Hasil Analisa (2 Sheets)",
-                        data=excel_file,
-                        file_name=f'Analisa_Saham_{date.today()}.xlsx',
-                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                    )
 
-                # --- TAMPILAN TABEL 1: GOLDEN SETUP ---
+                # --- PREPARASI DATA SPLIT VIEW (Histori) ---
+                df_hist_pct = (df_c.pct_change() * 100).dropna()
+                df_hist_pct.index = df_hist_pct.index.strftime('%d/%m/%Y')
+                df_hist_prc = df_c.copy()
+                df_hist_prc.index = df_hist_prc.index.strftime('%d/%m/%Y')
+
+                # TOMBOL DOWNLOAD (4 Sheets)
+                excel_file = to_excel_multi_sheet(df_top, df_analysis, df_hist_pct.T, df_hist_prc.T)
+                st.download_button(label="📥 Download Full Report (4 Sheets)", data=excel_file, file_name=f'Analisa_Lengkap_{end_d}.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+                # --- OUTPUT 1: GOLDEN SETUP ---
                 st.subheader("💎 Golden Setup (Rekomendasi Entry Jam 10:30)")
                 if not df_top.empty:
                     st.dataframe(df_top.style.apply(highlight_outperform, axis=1)
                                     .applymap(style_mfi, subset=['MFI (14D)'])
                                     .format({"MFI (14D)": "{:.1f}", "Vol/SMA20": "{:.2f}"}), use_container_width=True)
                 else:
-                    st.warning("Belum ada saham yang memenuhi syarat ketat hari ini.")
+                    st.warning("Tidak ada saham yang memenuhi syarat ketat hari ini.")
+
+                # --- OUTPUT 2: SPLIT VIEW (Hanya jika dicentang) ---
+                if show_split:
+                    st.divider()
+                    st.subheader("📈 Monitor Persentase Histori")
+                    # Format tampilan persentase untuk dashboard
+                    df_disp_pct = df_hist_pct.T.applymap(lambda x: f"{x:.1f}%")
+                    st.dataframe(df_disp_pct.style.applymap(style_percentage), use_container_width=True)
+                    
+                    st.subheader("💰 Monitor Harga Histori (IDR)")
+                    st.dataframe(df_hist_prc.T, use_container_width=True)
 
                 st.divider()
-                
-                # --- TAMPILAN TABEL 2: SEMUA DATA ---
                 st.write("### 📊 Monitor Seluruh Emiten")
                 st.dataframe(df_analysis.style.applymap(style_mfi, subset=['MFI (14D)']).format({"MFI (14D)": "{:.1f}", "Vol/SMA20": "{:.2f}"}), use_container_width=True)
             else:
