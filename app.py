@@ -55,7 +55,6 @@ def style_mfi(val):
 
 def style_market_rs(val):
     if val == 'Outperform':
-        # Mengubah warna menjadi Hijau Gelap (DarkGreen)
         return 'color: #006400; font-weight: bold;'
     return 'color: #ff4b4b;'
 
@@ -123,12 +122,12 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=False, min_a
 
         results.append({
             'Kode Saham': ticker_name,
-            'MFI (14D)': round(last_mfi, 2),
+            'MFI (14D)': last_mfi,
             'PVA': pva,
             'Market RS': rs,
             'Tren': "UP" if last_p > ma20 else "DOWN",
             'Last Price': int(last_p),
-            'Vol/SMA20': round(v.iloc[-1] / v_sma20, 2),
+            'Vol/SMA20': v.iloc[-1] / v_sma20 if v_sma20 > 0 else 0,
             'AvgVol20': int(avg_vol20)
         })
         
@@ -142,7 +141,7 @@ selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", op
 min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=50)
 max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
 
-# Mengubah default value menjadi 10.000.000
+# Default value 10.000.000 sesuai instruksi sebelumnya
 min_vol = st.sidebar.number_input("Min Avg Vol (20D)", value=10000000)
 
 today = date.today()
@@ -163,7 +162,6 @@ if btn_analisa:
         
         if not df_c.empty:
             df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, True, min_vol)
-            
             df_analysis = df_analysis[(df_analysis['Last Price'] >= min_p) & (df_analysis['Last Price'] <= max_p)]
 
             m1, m2, m3 = st.columns(3)
@@ -171,27 +169,34 @@ if btn_analisa:
             m2.metric("Shortlist Potensial", len(shortlist_keys))
             m3.metric("Database", loaded_file)
 
+            # TABEL 1: SHORTLIST
             st.subheader("🔥 Smart Money Shortlist (Top Picks)")
             df_short = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)]
             if not df_short.empty:
+                # Penerapan format 2 desimal pada Vol/SMA20 dan MFI
                 st.dataframe(df_short.style.applymap(style_mfi, subset=['MFI (14D)'])
                              .applymap(style_market_rs, subset=['Market RS'])
-                             .applymap(style_pva, subset=['PVA']), use_container_width=True)
+                             .applymap(style_pva, subset=['PVA'])
+                             .format({'Vol/SMA20': "{:.2f}", 'MFI (14D)': "{:.2f}"}), 
+                             use_container_width=True)
             else:
                 st.info("Tidak ada saham yang memenuhi kriteria shortlist saat ini.")
 
             st.markdown("---")
 
+            # TABEL 2: FULL ANALISA
             st.subheader("🔍 Seluruh Hasil Analisa")
             st.dataframe(df_analysis.style.applymap(style_mfi, subset=['MFI (14D)'])
-                         .applymap(style_market_rs, subset=['Market RS']), use_container_width=True, height=400)
+                         .applymap(style_market_rs, subset=['Market RS'])
+                         .format({'Vol/SMA20': "{:.2f}", 'MFI (14D)': "{:.2f}"}), 
+                         use_container_width=True, height=400)
 
             if show_histori:
                 st.markdown("---")
                 st.subheader("📈 Analisa Histori")
                 tab_h1, tab_h2 = st.tabs(["Perubahan Harga (%)", "Volume Transaksi"])
                 with tab_h1:
-                    st.dataframe((df_c.pct_change() * 100).tail(10).style.applymap(style_percentage), use_container_width=True)
+                    st.dataframe((df_c.pct_change() * 100).tail(10).style.applymap(style_percentage).format("{:.2f}%"), use_container_width=True)
                 with tab_h2:
                     st.dataframe(df_v.tail(10), use_container_width=True)
 
