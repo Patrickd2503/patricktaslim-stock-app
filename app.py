@@ -55,7 +55,8 @@ def style_mfi(val):
 
 def style_market_rs(val):
     if val == 'Outperform':
-        return 'color: #00ff00; font-weight: bold;'
+        # Mengubah warna menjadi Hijau Gelap (DarkGreen)
+        return 'color: #006400; font-weight: bold;'
     return 'color: #ff4b4b;'
 
 def style_pva(val):
@@ -79,7 +80,7 @@ def to_excel_multi_sheet(df_shortlist, df_all, df_pct, df_prc):
     return output.getvalue()
 
 # --- 4. LOGIKA ANALISA TEKNIKAL ---
-def get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=False, min_avg_volume=1000000):
+def get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=False, min_avg_volume=10000000):
     results, shortlist_keys = [], []
     
     if "^JKSE" in df_c.columns:
@@ -133,14 +134,16 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=False, min_a
         
     return pd.DataFrame(results), shortlist_keys
 
-# --- 5. UI SIDEBAR (KEMBALI LENGKAP) ---
+# --- 5. UI SIDEBAR ---
 st.sidebar.header("⚙️ Konfigurasi")
 target_list = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
 selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", options=target_list)
 
 min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=50)
 max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
-min_vol = st.sidebar.number_input("Min Avg Vol (20D)", value=1000000)
+
+# Mengubah default value menjadi 10.000.000
+min_vol = st.sidebar.number_input("Min Avg Vol (20D)", value=10000000)
 
 today = date.today()
 start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=30))
@@ -161,16 +164,13 @@ if btn_analisa:
         if not df_c.empty:
             df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, True, min_vol)
             
-            # Filter Harga (Min & Max)
             df_analysis = df_analysis[(df_analysis['Last Price'] >= min_p) & (df_analysis['Last Price'] <= max_p)]
 
-            # METRICS RINGKASAN
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Scan", len(df_analysis))
             m2.metric("Shortlist Potensial", len(shortlist_keys))
             m3.metric("Database", loaded_file)
 
-            # TABEL 1: SHORTLIST
             st.subheader("🔥 Smart Money Shortlist (Top Picks)")
             df_short = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)]
             if not df_short.empty:
@@ -182,12 +182,10 @@ if btn_analisa:
 
             st.markdown("---")
 
-            # TABEL 2: FULL ANALISA
             st.subheader("🔍 Seluruh Hasil Analisa")
             st.dataframe(df_analysis.style.applymap(style_mfi, subset=['MFI (14D)'])
                          .applymap(style_market_rs, subset=['Market RS']), use_container_width=True, height=400)
 
-            # BAGIAN HISTORI (Jika Checklist Aktif)
             if show_histori:
                 st.markdown("---")
                 st.subheader("📈 Analisa Histori")
@@ -197,7 +195,6 @@ if btn_analisa:
                 with tab_h2:
                     st.dataframe(df_v.tail(10), use_container_width=True)
 
-            # DOWNLOAD EXCEL
             report = to_excel_multi_sheet(df_short, df_analysis, df_c.pct_change(), df_c)
             st.sidebar.download_button("📥 Download Report Excel", report, f"Analisa_BEI_{date.today()}.xlsx")
         else:
