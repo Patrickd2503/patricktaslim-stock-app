@@ -62,7 +62,7 @@ def style_mfi(val):
     return ''
 
 def style_market_rs(val):
-    if val == 'Outperform': return 'color: #006400; font-weight: bold;'
+    if val == 'Outperform': return 'color: #006400; font-weight: bold;' # Hijau Gelap
     return 'color: #ff4b4b;'
 
 def style_pva(val):
@@ -105,7 +105,11 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         mf = tp * v
         pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
         neg_mf = (mf.where(tp < tp.shift(1), 0)).rolling(14).sum()
-        last_mfi = 100 - (100 / (1 + (pos_mf / neg_mf))).iloc[-1] if not neg_mf.empty and neg_mf.iloc[-1] != 0 else 50
+        
+        if neg_mf.empty or neg_mf.iloc[-1] == 0:
+            last_mfi = 50.0
+        else:
+            last_mfi = 100 - (100 / (1 + (pos_mf / neg_mf))).iloc[-1]
         
         ma20 = c.rolling(20).mean().iloc[-1]
         v_sma20 = v.rolling(20).mean().iloc[-1]
@@ -116,7 +120,8 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         elif p_change < -0.5 and v.iloc[-1] > v_sma20: pva = "Bearish Vol"
 
         ticker_name = str(col).replace('.JK','').upper()
-        rs = "Outperform" if ((c.iloc[-1]-c.iloc[-20])/c.iloc[-20]) > ihsg_perf else "Underperform"
+        stock_perf = (c.iloc[-1] - c.iloc[-20]) / c.iloc[-20] if len(c) >= 20 else 0
+        rs = "Outperform" if stock_perf > ihsg_perf else "Underperform"
 
         if pva == "Bullish Vol" and c.iloc[-1] > ma20 and last_mfi < 65:
             shortlist_keys.append(ticker_name)
@@ -124,10 +129,11 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         results.append({
             'Kode Saham': ticker_name,
             'Free Float (%)': float(ff_lookup.get(ticker_name, 0.0)),
-            'MFI (14D)': last_mfi,
+            'MFI (14D)': float(last_mfi),
             'PVA': pva,
             'Market RS': rs,
             'Last Price': int(c.iloc[-1]),
+            'Vol/SMA20': float(v.iloc[-1] / v_sma20) if v_sma20 > 0 else 0.0,
             'AvgVol20 (Lot)': int(avg_vol20 / 100)
         })
     return pd.DataFrame(results), shortlist_keys
@@ -135,34 +141,58 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
 # --- 5. UI SIDEBAR ---
 st.sidebar.header("⚙️ Konfigurasi")
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
-selected_tickers = st.sidebar.multiselect("Pilih Saham:", options=target_list)
-min_p = st.sidebar.number_input("Harga Min", value=50)
-max_p = st.sidebar.number_input("Harga Max", value=25000)
-min_vol_lot = st.sidebar.number_input("Min Avg Vol (LOT)", value=100000)
-max_ff = float(st.sidebar.slider("Max Free Float (%)", 0, 100, 100))
+selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", options=target_list)
+min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=50)
+max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
+min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=100000) # Default 100rb Lot
+max_ff = float(st.sidebar.slider("Maximal Free Float (%)", 0.0, 100.0, 100.0))
+st.sidebar.markdown("---")
 show_histori = st.sidebar.checkbox("📊 Tampilkan Analisa Histori")
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True)
 
 # --- 6. OUTPUT ---
 if btn_analisa:
-    active_list = selected_tickers if selected_tickers else target_list
-    df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple([k + ".JK" for k in active_list]), date.today()-timedelta(30), date.today())
-    
-    if not df_c.empty:
-        df_res, shortlist = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, min_vol_lot)
-        df_res = df_res[(df_res['Last Price']>=min_p) & (df_res['Last Price']<=max_p) & (df_res['Free Float (%)']<=max_ff)]
+    with st.spinner('Memproses data...'):
+        active_list = selected_tickers if selected_tickers else target_list
+        tickers_jk = [k + ".JK" for k in active_list]
+        df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), date.today()-timedelta(30), date.today())
         
-        st.subheader("🔥 Shortlist")
-        df_s = df_res[df_res['Kode Saham'].isin(shortlist)]
-        st.dataframe(df_s.style.applymap(style_mfi, subset=['MFI (14D)']).applymap(style_market_rs, subset=['Market RS']).applymap(style_pva, subset=['PVA']), use_container_width=True)
-        
-        st.subheader("🔍 Semua Hasil")
-        st.dataframe(df_res.style.applymap(style_mfi, subset=['MFI (14D)']).applymap(style_market_rs, subset=['Market RS']), use_container_width=True)
+        if not df_c.empty:
+            df_res, shortlist = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, min_vol_lot)
+            df_res = df_res[(df_res['Last Price']>=min_p) & (df_res['Last Price']<=max_p) & (df_res['Free Float (%)']<=max_ff)]
+            
+            # Format tampilan kolom desimal
+            format_dict = {
+                'Vol/SMA20': "{:.2f}",
+                'Free Float (%)': "{:.2f}%",
+                'MFI (14D)': "{:.2f}"
+            }
 
-        if show_histori:
-            st.subheader("📈 Histori Harga (%)")
-            st.dataframe((df_c.pct_change()*100).tail(10).style.applymap(style_percentage).format("{:.2f}%"), use_container_width=True)
+            st.subheader("🔥 Smart Money Shortlist (Top Picks)")
+            df_s = df_res[df_res['Kode Saham'].isin(shortlist)]
+            if not df_s.empty:
+                st.dataframe(df_s.style.applymap(style_mfi, subset=['MFI (14D)'])
+                             .applymap(style_market_rs, subset=['Market RS'])
+                             .applymap(style_pva, subset=['PVA'])
+                             .format(format_dict), use_container_width=True)
+            else:
+                st.info("Tidak ada saham yang memenuhi kriteria shortlist.")
+            
+            st.markdown("---")
+            st.subheader("🔍 Seluruh Hasil Analisa")
+            st.dataframe(df_res.style.applymap(style_mfi, subset=['MFI (14D)'])
+                         .applymap(style_market_rs, subset=['Market RS'])
+                         .format(format_dict), use_container_width=True, height=400)
 
-        # TOMBOL DOWNLOAD EXCEL
-        excel_data = to_excel_report(df_s, df_res)
-        st.sidebar.download_button(label="📥 Download Excel", data=excel_data, file_name=f"Report_{date.today()}.xlsx", mime="application/vnd.ms-excel")
+            if show_histori:
+                st.markdown("---")
+                st.subheader("📈 Histori Perubahan Harga (%)")
+                st.dataframe((df_c.pct_change()*100).tail(10).style.applymap(style_percentage).format("{:.2f}%"), use_container_width=True)
+
+            # Tombol Download
+            excel_data = to_excel_report(df_s, df_res)
+            st.sidebar.download_button(label="📥 Download Report Excel", data=excel_data, file_name=f"Analisa_Saham_{date.today()}.xlsx", mime="application/vnd.ms-excel")
+        else:
+            st.error("Data gagal diambil.")
+else:
+    st.info(f"Menggunakan data dari: {loaded_file}")
