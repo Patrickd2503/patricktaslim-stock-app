@@ -28,24 +28,29 @@ def fetch_yf_all_data(tickers, start_date, end_date):
         st.error(f"Error download data: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# --- 2. LOAD DATABASE EMITEN ---
+# --- 2. LOAD DATABASE EMITEN (MENGGUNAKAN FreeFloat.xlsx) ---
 def load_data_auto():
+    # Pastikan file ini berada di folder yang sama dengan script python Anda
     file_name = 'FreeFloat.xlsx'
     if os.path.exists(file_name):
         try: 
             df = pd.read_excel(file_name)
+            # Standarisasi kolom
             if 'Kode Saham' in df.columns:
+                # Bersihkan spasi jika ada
+                df['Kode Saham'] = df['Kode Saham'].astype(str).str.strip()
                 if 'Free Float' not in df.columns:
                     df['Free Float'] = 0
                 return df, file_name
         except Exception as e:
             st.error(f"Gagal membaca file {file_name}: {e}")
     
+    # Data cadangan jika file TIDAK ditemukan (Default Mode)
     default_data = pd.DataFrame({
-        'Kode Saham': ['WINS', 'CNKO', 'KOIN', 'STRK', 'KAEF', 'ICON', 'BUMI', 'GOTO', 'BBCA', 'BMRI'],
-        'Free Float': [30, 45, 20, 15, 10, 50, 60, 70, 40, 40]
+        'Kode Saham': ['WINS', 'CNKO', 'KOIN', 'STRK', 'KAEF', 'ICON', 'BUMI', 'GOTO', 'BBCA', 'BMRI', 'TLKM', 'ASII', 'ADRO', 'PTBA', 'UNVR'],
+        'Free Float': [30, 45, 20, 15, 10, 50, 60, 70, 40, 40, 40, 40, 35, 30, 15]
     })
-    return default_data, "Default Mode (File Not Found)"
+    return default_data, "Default Mode (File FreeFloat.xlsx TIDAK ditemukan)"
 
 df_emiten, loaded_file = load_data_auto()
 
@@ -60,7 +65,7 @@ def style_mfi(val):
 
 def style_market_rs(val):
     if val == 'Outperform':
-        return 'color: #006400; font-weight: bold;' # Hijau Gelap sesuai request Anda
+        return 'color: #006400; font-weight: bold;' # Hijau Gelap
     return 'color: #ff4b4b;'
 
 def style_pva(val):
@@ -75,17 +80,12 @@ def style_percentage(val):
     except: pass
     return ''
 
-def to_excel_multi_sheet(df_shortlist, df_all, df_pct, df_prc):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_shortlist.to_excel(writer, index=False, sheet_name='1. Shortlist')
-        df_all.to_excel(writer, index=False, sheet_name='2. Analisa Utama')
-        df_pct.tail(50).to_excel(writer, index=True, sheet_name='3. Histori Persen')
-    return output.getvalue()
-
 # --- 4. LOGIKA ANALISA TEKNIKAL ---
-def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=False, min_avg_volume=10000000):
+def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=False, min_avg_vol_lot=100000):
     results, shortlist_keys = [], []
+    
+    # Konversi input Lot ke Lembar untuk perhitungan yfinance
+    min_avg_vol_lembar = min_avg_vol_lot * 100
     
     if "^JKSE" in df_c.columns:
         ihsg_c = df_c["^JKSE"].dropna()
@@ -100,14 +100,19 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=Fals
         if len(c) < 30: continue
         
         avg_vol20 = v.rolling(20).mean().iloc[-1]
-        if avg_vol20 < min_avg_volume: continue
+        if avg_vol20 < min_avg_vol_lembar: continue
 
         tp = (h + l + c) / 3
         mf = tp * v
         pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
         neg_mf = (mf.where(tp < tp.shift(1), 0)).rolling(14).sum()
-        mfi_val = 100 - (100 / (1 + (pos_mf / neg_mf)))
-        last_mfi = mfi_val.iloc[-1] if not np.isnan(mfi_val.iloc[-1]) else 50
+        
+        # Penanganan pembagian nol pada MFI
+        if neg_mf.iloc[-1] == 0:
+            last_mfi = 100
+        else:
+            mfi_val = 100 - (100 / (1 + (pos_mf / neg_mf)))
+            last_mfi = mfi_val.iloc[-1] if not np.isnan(mfi_val.iloc[-1]) else 50
         
         ma20 = c.rolling(20).mean().iloc[-1]
         v_sma20 = v.rolling(20).mean().iloc[-1]
@@ -124,6 +129,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=Fals
         ticker_name = str(col).replace('.JK','')
         ff_val = df_ref[df_ref['Kode Saham'] == ticker_name]['Free Float'].values[0] if ticker_name in df_ref['Kode Saham'].values else 0
 
+        # SYARAT SHORTLIST
         if is_analisa_lengkap and pva == "Bullish Vol" and last_p > ma20 and last_mfi < 65:
             shortlist_keys.append(ticker_name)
 
@@ -136,7 +142,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=Fals
             'Tren': "UP" if last_p > ma20 else "DOWN",
             'Last Price': int(last_p),
             'Vol/SMA20': v.iloc[-1] / v_sma20 if v_sma20 > 0 else 0,
-            'AvgVol20': int(avg_vol20)
+            'AvgVol20 (Lot)': int(avg_vol20 / 100)
         })
         
     return pd.DataFrame(results), shortlist_keys
@@ -148,9 +154,11 @@ selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", op
 
 min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=50)
 max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
-min_vol = st.sidebar.number_input("Min Avg Vol (20D)", value=10000000) # Default 10jt
 
-# Perubahan: Minimal menjadi Maximal Free Float
+# INPUT SEKARANG DALAM SATUAN LOT
+# Default: 100.000 Lot (Setara 10jt lembar)
+min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=100000)
+
 max_ff = st.sidebar.slider("Maximal Free Float (%)", 0, 100, 100)
 
 today = date.today()
@@ -170,13 +178,13 @@ if btn_analisa:
         df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
         
         if not df_c.empty:
-            df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, True, min_vol)
+            df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, True, min_vol_lot)
             
             # Filter Harga & Maximal Free Float
             df_analysis = df_analysis[
                 (df_analysis['Last Price'] >= min_p) & 
                 (df_analysis['Last Price'] <= max_p) &
-                (df_analysis['Free Float (%)'] <= max_ff) # Filter <= (Maximal)
+                (df_analysis['Free Float (%)'] <= max_ff)
             ]
 
             m1, m2, m3 = st.columns(3)
@@ -184,6 +192,7 @@ if btn_analisa:
             m2.metric("Shortlist Potensial", len(shortlist_keys))
             m3.metric("Source File", loaded_file)
 
+            # TABEL 1: SHORTLIST
             st.subheader("🔥 Smart Money Shortlist (Top Picks)")
             df_short = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)]
             if not df_short.empty:
@@ -197,6 +206,7 @@ if btn_analisa:
 
             st.markdown("---")
 
+            # TABEL 2: FULL ANALISA
             st.subheader("🔍 Seluruh Hasil Analisa")
             st.dataframe(df_analysis.style.applymap(style_mfi, subset=['MFI (14D)'])
                          .applymap(style_market_rs, subset=['Market RS'])
@@ -208,13 +218,18 @@ if btn_analisa:
                 st.subheader("📈 Analisa Histori")
                 tab_h1, tab_h2 = st.tabs(["Perubahan Harga (%)", "Volume Transaksi"])
                 with tab_h1:
-                    st.dataframe((df_c.pct_change() * 100).tail(10).style.applymap(style_percentage).format("{:.2f}%"), use_container_width=True)
+                    # Filter hanya saham yang ada di hasil analisa utama
+                    hist_df = (df_c[ [c for c in df_c.columns if c.replace('.JK','') in df_analysis['Kode Saham'].values] ].pct_change() * 100).tail(10)
+                    st.dataframe(hist_df.style.applymap(style_percentage).format("{:.2f}%"), use_container_width=True)
                 with tab_h2:
-                    st.dataframe(df_v.tail(10), use_container_width=True)
+                    vol_df = df_v[ [c for c in df_v.columns if c.replace('.JK','') in df_analysis['Kode Saham'].values] ].tail(10)
+                    st.dataframe(vol_df, use_container_width=True)
 
-            report = to_excel_multi_sheet(df_short, df_analysis, df_c.pct_change(), df_c)
-            st.sidebar.download_button("📥 Download Report Excel", report, f"Analisa_BEI_{date.today()}.xlsx")
         else:
-            st.error("Data tidak ditemukan.")
+            st.error("Data tidak ditemukan. Pastikan koneksi internet aktif.")
 else:
-    st.info(f"Menggunakan data dari {loaded_file}. Klik tombol untuk mulai.")
+    if "TIDAK ditemukan" in loaded_file:
+        st.warning(f"⚠️ {loaded_file}. Harap letakkan file FreeFloat.xlsx di folder yang sama dengan script.")
+    else:
+        st.success(f"✅ Berhasil memuat data dari {loaded_file}")
+    st.info("Atur filter di sidebar dan klik 'Jalankan Analisa'.")
