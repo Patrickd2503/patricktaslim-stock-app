@@ -28,29 +28,37 @@ def fetch_yf_all_data(tickers, start_date, end_date):
         st.error(f"Error download data: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# --- 2. LOAD DATABASE EMITEN ---
+# --- 2. LOAD DATABASE EMITEN (PERBAIKAN LOGIKA BACA EXCEL) ---
 def load_data_auto():
     file_name = 'FreeFloat.xlsx'
     if os.path.exists(file_name):
         try: 
             df = pd.read_excel(file_name)
+            # Bersihkan nama kolom dari spasi di depan/belakang
+            df.columns = df.columns.str.strip()
+            
             if 'Kode Saham' in df.columns:
-                df['Kode Saham'] = df['Kode Saham'].astype(str).str.strip()
+                # Bersihkan data: Kapital semua, hapus spasi, hapus akhiran .JK jika ada
+                df['Kode Saham'] = df['Kode Saham'].astype(str).str.strip().str.upper().str.replace('.JK', '', regex=False)
                 
                 if 'Free Float' in df.columns:
-                    # PERBAIKAN: Paksa kolom Free Float jadi angka, buang karakter teks jika ada
+                    # Jika data di excel berupa desimal (0.15) ubah ke persen (15.0)
+                    # Jika sudah persen (15) tetap 15
                     df['Free Float'] = pd.to_numeric(df['Free Float'], errors='coerce').fillna(0)
+                    if df['Free Float'].max() <= 1.0 and df['Free Float'].max() > 0:
+                        df['Free Float'] = df['Free Float'] * 100
                 else:
                     df['Free Float'] = 0
                 return df, file_name
         except Exception as e:
             st.error(f"Gagal membaca file {file_name}: {e}")
     
+    # Cadangan jika file tidak ditemukan
     default_data = pd.DataFrame({
-        'Kode Saham': ['WINS', 'CNKO', 'KOIN', 'STRK', 'KAEF', 'ICON', 'BUMI', 'GOTO', 'BBCA', 'BMRI'],
-        'Free Float': [30.0, 45.0, 20.0, 15.0, 10.0, 50.0, 60.0, 70.0, 40.0, 40.0]
+        'Kode Saham': ['WINS', 'CNKO', 'KOIN', 'STRK', 'KAEF'],
+        'Free Float': [30.0, 45.0, 20.0, 15.0, 10.0]
     })
-    return default_data, "Default Mode (File FreeFloat.xlsx TIDAK ditemukan)"
+    return default_data, "Default Mode (File Tidak Ditemukan)"
 
 df_emiten, loaded_file = load_data_auto()
 
@@ -59,7 +67,7 @@ def style_mfi(val):
     try:
         num = float(val)
         if num >= 80: return 'background-color: #ff4b4b; color: white'
-        if num <= 40: return 'background-color: #008000; color: white'
+        if num <= 40: return 'background-color: #006400; color: white' # Hijau Gelap
     except: pass
     return ''
 
@@ -68,21 +76,13 @@ def style_market_rs(val):
         return 'color: #006400; font-weight: bold;'
     return 'color: #ff4b4b;'
 
-def style_pva(val):
-    if val == 'Bullish Vol': return 'background-color: rgba(0, 255, 0, 0.2);'
-    if val == 'Bearish Vol': return 'background-color: rgba(255, 0, 0, 0.2);'
-    return ''
-
 # --- 4. LOGIKA ANALISA TEKNIKAL ---
 def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=False, min_avg_vol_lot=100000):
     results, shortlist_keys = [], []
     min_avg_vol_lembar = min_avg_vol_lot * 100
     
-    if "^JKSE" in df_c.columns:
-        ihsg_c = df_c["^JKSE"].dropna()
-        ihsg_perf = (ihsg_c.iloc[-1] - ihsg_c.iloc[-20]) / ihsg_c.iloc[-20] if len(ihsg_c) >= 20 else 0
-    else:
-        ihsg_perf = 0
+    # Buat dictionary untuk lookup cepat agar tidak 0%
+    ff_lookup = dict(zip(df_ref['Kode Saham'], df_ref['Free Float']))
 
     for col in df_c.columns:
         if col == "^JKSE" or col == "" or pd.isna(col): continue
@@ -93,13 +93,13 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=Fals
         avg_vol20 = v.rolling(20).mean().iloc[-1]
         if avg_vol20 < min_avg_vol_lembar: continue
 
+        # Analisa Teknikal Sederhana
         tp = (h + l + c) / 3
         mf = tp * v
         pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
         neg_mf = (mf.where(tp < tp.shift(1), 0)).rolling(14).sum()
         
-        if neg_mf.iloc[-1] == 0:
-            last_mfi = 100
+        if neg_mf.iloc[-1] == 0: last_mfi = 100
         else:
             mfi_val = 100 - (100 / (1 + (pos_mf / neg_mf)))
             last_mfi = mfi_val.iloc[-1] if not np.isnan(mfi_val.iloc[-1]) else 50
@@ -113,25 +113,19 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=Fals
         if p_change > 0.5 and v.iloc[-1] > v_sma20: pva = "Bullish Vol"
         elif p_change < -0.5 and v.iloc[-1] > v_sma20: pva = "Bearish Vol"
 
-        stock_perf = (c.iloc[-1] - c.iloc[-20]) / c.iloc[-20] if len(c) >= 20 else 0
-        rs = "Outperform" if stock_perf > ihsg_perf else "Underperform"
-
-        ticker_name = str(col).replace('.JK','')
+        ticker_name = str(col).replace('.JK','').upper().strip()
         
-        # Ambil data Free Float dan pastikan itu angka float
-        ff_row = df_ref[df_ref['Kode Saham'] == ticker_name]
-        ff_val = float(ff_row['Free Float'].values[0]) if not ff_row.empty else 0.0
+        # Ambil Free Float dari Dictionary (Lookup)
+        ff_val = ff_lookup.get(ticker_name, 0.0)
 
         if is_analisa_lengkap and pva == "Bullish Vol" and last_p > ma20 and last_mfi < 65:
             shortlist_keys.append(ticker_name)
 
         results.append({
             'Kode Saham': ticker_name,
-            'Free Float (%)': ff_val,
+            'Free Float (%)': float(ff_val),
             'MFI (14D)': last_mfi,
             'PVA': pva,
-            'Market RS': rs,
-            'Tren': "UP" if last_p > ma20 else "DOWN",
             'Last Price': int(last_p),
             'Vol/SMA20': v.iloc[-1] / v_sma20 if v_sma20 > 0 else 0,
             'AvgVol20 (Lot)': int(avg_vol20 / 100)
@@ -141,27 +135,23 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=Fals
 
 # --- 5. UI SIDEBAR ---
 st.sidebar.header("⚙️ Konfigurasi")
-target_list = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
+target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
 selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", options=target_list)
 
 min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=50)
 max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
-min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=100000)
-
-# Pastikan slider menghasilkan float untuk perbandingan
+min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=100000) # Default 100rb Lot
 max_ff = float(st.sidebar.slider("Maximal Free Float (%)", 0, 100, 100))
 
 today = date.today()
 start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=30))
 end_d = st.sidebar.date_input("Tanggal Akhir", today)
 
-st.sidebar.markdown("---")
-show_histori = st.sidebar.checkbox("📊 Tampilkan Analisa Histori")
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True)
 
 # --- 6. OUTPUT DASHBOARD ---
 if btn_analisa:
-    with st.spinner('Scanning market data...'):
+    with st.spinner('Mencocokkan data...'):
         active_list = selected_tickers if selected_tickers else target_list
         tickers_jk = [str(k).strip() + ".JK" for k in active_list]
         
@@ -170,45 +160,18 @@ if btn_analisa:
         if not df_c.empty:
             df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, True, min_vol_lot)
             
-            # PERBAIKAN: Pastikan kolom Free Float (%) bertipe float sebelum dibandingkan
-            df_analysis['Free Float (%)'] = pd.to_numeric(df_analysis['Free Float (%)'], errors='coerce').fillna(0)
-            
-            # Filter Harga & Maximal Free Float
+            # Filter Final
             df_analysis = df_analysis[
                 (df_analysis['Last Price'] >= min_p) & 
                 (df_analysis['Last Price'] <= max_p) &
                 (df_analysis['Free Float (%)'] <= max_ff)
             ]
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Total Scan", len(df_analysis))
-            m2.metric("Shortlist Potensial", len(shortlist_keys))
-            m3.metric("Source File", loaded_file)
-
-            # TABEL 1: SHORTLIST
-            st.subheader("🔥 Smart Money Shortlist (Top Picks)")
-            df_short = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)]
-            if not df_short.empty:
-                st.dataframe(df_short.style.applymap(style_mfi, subset=['MFI (14D)'])
-                             .applymap(style_market_rs, subset=['Market RS'])
-                             .applymap(style_pva, subset=['PVA'])
-                             .format({'Vol/SMA20': "{:.2f}", 'MFI (14D)': "{:.2f}", 'Free Float (%)': "{:.1f}%"}), 
-                             use_container_width=True)
-            else:
-                st.info("Tidak ada saham yang memenuhi kriteria shortlist.")
-
-            st.markdown("---")
-
-            # TABEL 2: FULL ANALISA
-            st.subheader("🔍 Seluruh Hasil Analisa")
+            st.subheader("🔍 Hasil Analisa")
             st.dataframe(df_analysis.style.applymap(style_mfi, subset=['MFI (14D)'])
-                         .applymap(style_market_rs, subset=['Market RS'])
                          .format({'Vol/SMA20': "{:.2f}", 'MFI (14D)': "{:.2f}", 'Free Float (%)': "{:.1f}%"}), 
-                         use_container_width=True, height=400)
+                         use_container_width=True)
         else:
             st.error("Data tidak ditemukan.")
 else:
-    if "TIDAK ditemukan" in loaded_file:
-        st.warning(f"⚠️ {loaded_file}. Pastikan file 'FreeFloat.xlsx' sudah diupload ke GitHub repositori Anda.")
-    else:
-        st.success(f"✅ Siap menganalisa menggunakan {loaded_file}")
+    st.info(f"Menggunakan data dari: {loaded_file}")
