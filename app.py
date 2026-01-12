@@ -28,13 +28,12 @@ def fetch_yf_all_data(tickers, start_date, end_date):
         st.error(f"Error download data: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# --- 2. LOAD DATABASE EMITEN (MENGGUNAKAN FreeFloat.xlsx) ---
+# --- 2. LOAD DATABASE EMITEN ---
 def load_data_auto():
     file_name = 'FreeFloat.xlsx'
     if os.path.exists(file_name):
         try: 
             df = pd.read_excel(file_name)
-            # Standarisasi kolom: pastikan ada 'Kode Saham' dan 'Free Float'
             if 'Kode Saham' in df.columns:
                 if 'Free Float' not in df.columns:
                     df['Free Float'] = 0
@@ -42,7 +41,6 @@ def load_data_auto():
         except Exception as e:
             st.error(f"Gagal membaca file {file_name}: {e}")
     
-    # Default data jika file tidak ditemukan
     default_data = pd.DataFrame({
         'Kode Saham': ['WINS', 'CNKO', 'KOIN', 'STRK', 'KAEF', 'ICON', 'BUMI', 'GOTO', 'BBCA', 'BMRI'],
         'Free Float': [30, 45, 20, 15, 10, 50, 60, 70, 40, 40]
@@ -62,7 +60,7 @@ def style_mfi(val):
 
 def style_market_rs(val):
     if val == 'Outperform':
-        return 'color: #006400; font-weight: bold;' # Hijau Gelap
+        return 'color: #006400; font-weight: bold;' # Hijau Gelap sesuai request Anda
     return 'color: #ff4b4b;'
 
 def style_pva(val):
@@ -124,8 +122,6 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, is_analisa_lengkap=Fals
         rs = "Outperform" if stock_perf > ihsg_perf else "Underperform"
 
         ticker_name = str(col).replace('.JK','')
-        
-        # Ambil data Free Float dari file Excel
         ff_val = df_ref[df_ref['Kode Saham'] == ticker_name]['Free Float'].values[0] if ticker_name in df_ref['Kode Saham'].values else 0
 
         if is_analisa_lengkap and pva == "Bullish Vol" and last_p > ma20 and last_mfi < 65:
@@ -153,7 +149,9 @@ selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", op
 min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=50)
 max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
 min_vol = st.sidebar.number_input("Min Avg Vol (20D)", value=10000000) # Default 10jt
-min_ff = st.sidebar.slider("Minimal Free Float (%)", 0, 100, 10)
+
+# Perubahan: Minimal menjadi Maximal Free Float
+max_ff = st.sidebar.slider("Maximal Free Float (%)", 0, 100, 100)
 
 today = date.today()
 start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=30))
@@ -174,11 +172,11 @@ if btn_analisa:
         if not df_c.empty:
             df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, True, min_vol)
             
-            # Filter Harga & Free Float
+            # Filter Harga & Maximal Free Float
             df_analysis = df_analysis[
                 (df_analysis['Last Price'] >= min_p) & 
                 (df_analysis['Last Price'] <= max_p) &
-                (df_analysis['Free Float (%)'] >= min_ff)
+                (df_analysis['Free Float (%)'] <= max_ff) # Filter <= (Maximal)
             ]
 
             m1, m2, m3 = st.columns(3)
@@ -186,7 +184,6 @@ if btn_analisa:
             m2.metric("Shortlist Potensial", len(shortlist_keys))
             m3.metric("Source File", loaded_file)
 
-            # TABEL 1: SHORTLIST
             st.subheader("🔥 Smart Money Shortlist (Top Picks)")
             df_short = df_analysis[df_analysis['Kode Saham'].isin(shortlist_keys)]
             if not df_short.empty:
@@ -196,11 +193,10 @@ if btn_analisa:
                              .format({'Vol/SMA20': "{:.2f}", 'MFI (14D)': "{:.2f}", 'Free Float (%)': "{:.1f}%"}), 
                              use_container_width=True)
             else:
-                st.info("Tidak ada saham yang memenuhi kriteria shortlist (Bullish Vol + Low MFI).")
+                st.info("Tidak ada saham yang memenuhi kriteria shortlist.")
 
             st.markdown("---")
 
-            # TABEL 2: FULL ANALISA
             st.subheader("🔍 Seluruh Hasil Analisa")
             st.dataframe(df_analysis.style.applymap(style_mfi, subset=['MFI (14D)'])
                          .applymap(style_market_rs, subset=['Market RS'])
@@ -219,6 +215,6 @@ if btn_analisa:
             report = to_excel_multi_sheet(df_short, df_analysis, df_c.pct_change(), df_c)
             st.sidebar.download_button("📥 Download Report Excel", report, f"Analisa_BEI_{date.today()}.xlsx")
         else:
-            st.error("Data tidak ditemukan. Pastikan koneksi internet aktif.")
+            st.error("Data tidak ditemukan.")
 else:
     st.info(f"Menggunakan data dari {loaded_file}. Klik tombol untuk mulai.")
