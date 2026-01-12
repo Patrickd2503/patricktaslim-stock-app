@@ -39,7 +39,7 @@ def load_data_auto():
                     return df, file_name
             except: continue
     
-    default_data = pd.DataFrame({'Kode Saham': ['WINS', 'CNKO', 'KOIN', 'STRK', 'KAEF', 'ICON', 'SPRE', 'LIVE', 'VIVA', 'BUMI', 'GOTO', 'BBCA', 'BMRI', 'TLKM', 'ASII', 'ADRO']})
+    default_data = pd.DataFrame({'Kode Saham': ['WINS', 'CNKO', 'KOIN', 'STRK', 'KAEF', 'ICON', 'SPRE', 'LIVE', 'VIVA', 'BUMI', 'GOTO', 'BBCA', 'BMRI', 'TLKM', 'ASII']})
     return default_data, "Default Mode (File Not Found)"
 
 df_emiten, loaded_file = load_data_auto()
@@ -48,8 +48,8 @@ df_emiten, loaded_file = load_data_auto()
 def style_mfi(val):
     try:
         num = float(val)
-        if num >= 80: return 'background-color: #ff4b4b; color: white' # Overbought
-        if num <= 40: return 'background-color: #008000; color: white' # Accumulation
+        if num >= 80: return 'background-color: #ff4b4b; color: white'
+        if num <= 40: return 'background-color: #008000; color: white'
     except: pass
     return ''
 
@@ -61,6 +61,13 @@ def style_market_rs(val):
 def style_pva(val):
     if val == 'Bullish Vol': return 'background-color: rgba(0, 255, 0, 0.2);'
     if val == 'Bearish Vol': return 'background-color: rgba(255, 0, 0, 0.2);'
+    return ''
+
+def style_percentage(val):
+    try:
+        if val > 0: return 'color: green'
+        elif val < 0: return 'color: red'
+    except: pass
     return ''
 
 def to_excel_multi_sheet(df_shortlist, df_all, df_pct, df_prc):
@@ -90,7 +97,6 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=False, min_a
         avg_vol20 = v.rolling(20).mean().iloc[-1]
         if avg_vol20 < min_avg_volume: continue
 
-        # Hitung MFI
         tp = (h + l + c) / 3
         mf = tp * v
         pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
@@ -111,7 +117,6 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=False, min_a
         rs = "Outperform" if stock_perf > ihsg_perf else "Underperform"
 
         ticker_name = str(col).replace('.JK','')
-        # KRITERIA SHORTLIST: Bullish Volume + Uptrend + MFI Belum Overbought
         if is_analisa_lengkap and pva == "Bullish Vol" and last_p > ma20 and last_mfi < 65:
             shortlist_keys.append(ticker_name)
 
@@ -128,21 +133,26 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, is_analisa_lengkap=False, min_a
         
     return pd.DataFrame(results), shortlist_keys
 
-# --- 5. UI SIDEBAR ---
+# --- 5. UI SIDEBAR (KEMBALI LENGKAP) ---
 st.sidebar.header("⚙️ Konfigurasi")
 target_list = sorted(df_emiten['Kode Saham'].dropna().unique().tolist())
 selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", options=target_list)
 
-min_p = st.sidebar.number_input("Harga Min", value=50)
+min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=50)
+max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
 min_vol = st.sidebar.number_input("Min Avg Vol (20D)", value=1000000)
-start_d = st.sidebar.date_input("Mulai", date.today() - timedelta(days=30))
-end_d = st.sidebar.date_input("Akhir", date.today())
 
+today = date.today()
+start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=30))
+end_d = st.sidebar.date_input("Tanggal Akhir", today)
+
+st.sidebar.markdown("---")
+show_histori = st.sidebar.checkbox("📊 Tampilkan Analisa Histori")
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True)
 
 # --- 6. OUTPUT DASHBOARD ---
 if btn_analisa:
-    with st.spinner('Processing...'):
+    with st.spinner('Memproses data market...'):
         active_list = selected_tickers if selected_tickers else target_list
         tickers_jk = [str(k).strip() + ".JK" for k in active_list]
         
@@ -150,9 +160,11 @@ if btn_analisa:
         
         if not df_c.empty:
             df_analysis, shortlist_keys = get_signals_and_data(df_c, df_v, df_h, df_l, True, min_vol)
-            df_analysis = df_analysis[df_analysis['Last Price'] >= min_p]
+            
+            # Filter Harga (Min & Max)
+            df_analysis = df_analysis[(df_analysis['Last Price'] >= min_p) & (df_analysis['Last Price'] <= max_p)]
 
-            # METRICS
+            # METRICS RINGKASAN
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Scan", len(df_analysis))
             m2.metric("Shortlist Potensial", len(shortlist_keys))
@@ -175,10 +187,20 @@ if btn_analisa:
             st.dataframe(df_analysis.style.applymap(style_mfi, subset=['MFI (14D)'])
                          .applymap(style_market_rs, subset=['Market RS']), use_container_width=True, height=400)
 
-            # DOWNLOAD
+            # BAGIAN HISTORI (Jika Checklist Aktif)
+            if show_histori:
+                st.markdown("---")
+                st.subheader("📈 Analisa Histori")
+                tab_h1, tab_h2 = st.tabs(["Perubahan Harga (%)", "Volume Transaksi"])
+                with tab_h1:
+                    st.dataframe((df_c.pct_change() * 100).tail(10).style.applymap(style_percentage), use_container_width=True)
+                with tab_h2:
+                    st.dataframe(df_v.tail(10), use_container_width=True)
+
+            # DOWNLOAD EXCEL
             report = to_excel_multi_sheet(df_short, df_analysis, df_c.pct_change(), df_c)
-            st.sidebar.download_button("📥 Download Excel", report, f"Analisa_{date.today()}.xlsx")
+            st.sidebar.download_button("📥 Download Report Excel", report, f"Analisa_BEI_{date.today()}.xlsx")
         else:
-            st.error("Data gagal diambil. Cek koneksi atau ticker.")
+            st.error("Data gagal diambil. Cek koneksi atau kode emiten.")
 else:
-    st.info("Klik tombol di sidebar untuk memulai analisa.")
+    st.info("Silakan atur parameter di sidebar dan klik 'Jalankan Analisa'.")
