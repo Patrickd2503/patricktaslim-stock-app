@@ -142,31 +142,33 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
 st.sidebar.header("⚙️ Konfigurasi")
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
 selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", options=target_list)
+
 min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=50)
 max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
-min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=100000) # Default 100rb Lot
+min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=100000)
 max_ff = float(st.sidebar.slider("Maximal Free Float (%)", 0.0, 100.0, 100.0))
+
+# --- RANGE TANGGAL ---
+today = date.today()
+start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=30))
+end_d = st.sidebar.date_input("Tanggal Akhir", today)
+
 st.sidebar.markdown("---")
 show_histori = st.sidebar.checkbox("📊 Tampilkan Analisa Histori")
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True)
 
 # --- 6. OUTPUT ---
 if btn_analisa:
-    with st.spinner('Memproses data...'):
+    with st.spinner('Menganalisa market...'):
         active_list = selected_tickers if selected_tickers else target_list
         tickers_jk = [k + ".JK" for k in active_list]
-        df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), date.today()-timedelta(30), date.today())
+        df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
         
         if not df_c.empty:
             df_res, shortlist = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, min_vol_lot)
             df_res = df_res[(df_res['Last Price']>=min_p) & (df_res['Last Price']<=max_p) & (df_res['Free Float (%)']<=max_ff)]
             
-            # Format tampilan kolom desimal
-            format_dict = {
-                'Vol/SMA20': "{:.2f}",
-                'Free Float (%)': "{:.2f}%",
-                'MFI (14D)': "{:.2f}"
-            }
+            format_dict = {'Vol/SMA20': "{:.2f}", 'Free Float (%)': "{:.2f}%", 'MFI (14D)': "{:.2f}"}
 
             st.subheader("🔥 Smart Money Shortlist (Top Picks)")
             df_s = df_res[df_res['Kode Saham'].isin(shortlist)]
@@ -189,10 +191,10 @@ if btn_analisa:
                 st.subheader("📈 Histori Perubahan Harga (%)")
                 st.dataframe((df_c.pct_change()*100).tail(10).style.applymap(style_percentage).format("{:.2f}%"), use_container_width=True)
 
-            # Tombol Download
+            # Tombol Download muncul di sidebar setelah klik analisa
             excel_data = to_excel_report(df_s, df_res)
-            st.sidebar.download_button(label="📥 Download Report Excel", data=excel_data, file_name=f"Analisa_Saham_{date.today()}.xlsx", mime="application/vnd.ms-excel")
+            st.sidebar.download_button(label="📥 Download Report Excel", data=excel_data, file_name=f"Analisa_BEI_{date.today()}.xlsx", mime="application/vnd.ms-excel")
         else:
-            st.error("Data gagal diambil.")
+            st.error("Data gagal diambil untuk range tanggal tersebut.")
 else:
-    st.info(f"Menggunakan data dari: {loaded_file}")
+    st.info(f"Siap menganalisa menggunakan: {loaded_file}")
