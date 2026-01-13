@@ -62,13 +62,17 @@ def style_mfi(val):
     return ''
 
 def style_market_rs(val):
-    if val == 'Outperform': return 'color: #006400; font-weight: bold;' # Hijau Gelap
+    if val == 'Outperform': return 'color: #006400; font-weight: bold;' # Hijau Gelap Sesuai Request
     return 'color: #ff4b4b;'
 
 def style_pva(val):
     if val == 'Bullish Vol': return 'background-color: rgba(0, 255, 0, 0.2);'
     if val == 'Bearish Vol': return 'background-color: rgba(255, 0, 0, 0.2);'
     return ''
+
+def style_ma_filter(val):
+    if val == 'YA': return 'color: green; font-weight: bold;'
+    return 'color: red;'
 
 def style_percentage(val):
     try:
@@ -115,6 +119,9 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         v_sma20 = v.rolling(20).mean().iloc[-1]
         p_change = ((c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]) * 100
         
+        # --- LOGIKA FILTER MA20 ---
+        is_above_ma20 = "YA" if c.iloc[-1] > ma20 else "TIDAK"
+        
         pva = "Neutral"
         if p_change > 0.5 and v.iloc[-1] > v_sma20: pva = "Bullish Vol"
         elif p_change < -0.5 and v.iloc[-1] > v_sma20: pva = "Bearish Vol"
@@ -123,7 +130,8 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         stock_perf = (c.iloc[-1] - c.iloc[-20]) / c.iloc[-20] if len(c) >= 20 else 0
         rs = "Outperform" if stock_perf > ihsg_perf else "Underperform"
 
-        if pva == "Bullish Vol" and c.iloc[-1] > ma20 and last_mfi < 65:
+        # Shortlist Filter: Harus Bullish, Diatas MA20, dan MFI Belum Jenuh
+        if pva == "Bullish Vol" and is_above_ma20 == "YA" and last_mfi < 65:
             shortlist_keys.append(ticker_name)
 
         results.append({
@@ -132,6 +140,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
             'MFI (14D)': float(last_mfi),
             'PVA': pva,
             'Market RS': rs,
+            'Above MA20': is_above_ma20, # Kolom Baru
             'Last Price': int(c.iloc[-1]),
             'Vol/SMA20': float(v.iloc[-1] / v_sma20) if v_sma20 > 0 else 0.0,
             'AvgVol20 (Lot)': int(avg_vol20 / 100)
@@ -176,6 +185,7 @@ if btn_analisa:
                 st.dataframe(df_s.style.applymap(style_mfi, subset=['MFI (14D)'])
                              .applymap(style_market_rs, subset=['Market RS'])
                              .applymap(style_pva, subset=['PVA'])
+                             .applymap(style_ma_filter, subset=['Above MA20'])
                              .format(format_dict), use_container_width=True)
             else:
                 st.info("Tidak ada saham yang memenuhi kriteria shortlist.")
@@ -184,6 +194,7 @@ if btn_analisa:
             st.subheader("🔍 Seluruh Hasil Analisa")
             st.dataframe(df_res.style.applymap(style_mfi, subset=['MFI (14D)'])
                          .applymap(style_market_rs, subset=['Market RS'])
+                         .applymap(style_ma_filter, subset=['Above MA20'])
                          .format(format_dict), use_container_width=True, height=400)
 
             if show_histori:
