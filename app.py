@@ -6,29 +6,43 @@ from datetime import date, timedelta
 import os
 from io import BytesIO
 
+# --- 1. FUNGSI STYLE (PEWARNAAN CELL) ---
+def style_percentage(val):
+    if pd.isna(val) or val == "": return ""
+    try:
+        num = float(str(val).replace('%', ''))
+        if num > 0: return 'background-color: #2ecc71; color: white' # Hijau
+        elif num < 0: return 'background-color: #e74c3c; color: white' # Merah
+        else: return 'background-color: #f1c40f; color: black' # Kuning
+    except: return ""
+
 # --- CONFIG DASHBOARD ---
 st.set_page_config(page_title="Monitor Saham BEI Ultra v11", layout="wide")
 st.title("🎯 Dashboard Akumulasi: Smart Money Monitor")
 
-# --- 1. FITUR CACHE DATA ---
+# --- 2. FITUR CACHE DATA ---
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
     all_tickers = list(tickers) + ["^JKSE"]
+    # Menambah buffer 450 hari untuk indikator teknikal (MFI, MA20, ARA 12M)
     extended_start = start_date - timedelta(days=450) 
     try:
         df = yf.download(all_tickers, start=extended_start, end=end_date, threads=True, progress=False)
-        if df.empty:
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        if df.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        
+        # Filter hanya untuk range tanggal yang dipilih user (Oktober - Desember)
+        mask = (df.index.date >= start_date) & (df.index.date <= end_date)
+        df_filtered = df.loc[mask]
         
         if isinstance(df.columns, pd.MultiIndex):
-            return df['Close'], df['Volume'], df['High'], df['Low']
+            return df['Close'], df['Volume'], df['High'], df['Low'], df_filtered['Close']
         else:
-            return df[['Close']], df[['Volume']], df[['High']], df[['Low']]
+            return df[['Close']], df[['Volume']], df[['High']], df[['Low']], df_filtered[['Close']]
     except Exception as e:
         st.error(f"Error download data: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# --- 2. LOAD DATABASE EMITEN ---
+# --- 3. LOAD DATABASE ---
 def load_data_auto():
     POSSIBLE_FILES = ['FreeFloat.xlsx', 'Kode Saham.xlsx', 'Kode_Saham.xlsx', 'Kode Saham.xlsx - Sheet1.csv']
     for file_name in POSSIBLE_FILES:
@@ -40,38 +54,22 @@ def load_data_auto():
                     df['Kode Saham'] = df['Kode Saham'].astype(str).str.strip().str.upper().str.replace('.JK', '', regex=False)
                 return df, file_name
             except: continue
-    return pd.DataFrame({'Kode Saham': ['WINS', 'CNKO', 'KOIN'], 'Free Float': [30.0, 45.0, 20.0]}), "Default Mode"
+    return pd.DataFrame({'Kode Saham': ['WINS', 'CNKO', 'KOIN']}), "Default Mode"
 
 df_emiten, loaded_file = load_data_auto()
 
-# --- 3. FUNGSI EXPORT ---
-def generate_combined_report(df_s, df_res, df_c):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_res.to_excel(writer, index=False, sheet_name='Analisa_Lengkap')
-        if not df_s.empty:
-            df_s.to_excel(writer, index=False, sheet_name='Shortlist')
-        
-        # Histori untuk Split View Report
-        df_pct = (df_c.pct_change() * 100).tail(30)
-        df_pct.to_excel(writer, index=True, sheet_name='Histori_Persentase')
-        df_c.tail(30).to_excel(writer, index=True, sheet_name='Histori_Harga')
-    return output.getvalue()
-
-# --- 4. LOGIKA ANALISA GABUNGAN ---
-def run_full_analysis(df_c, df_v, df_h, df_l, mode_source, min_p, max_p, is_custom_selection):
+# --- 4. LOGIKA ANALISA ---
+def run_full_analysis(df_c_all, df_v, df_h, df_l, mode_source, min_p, max_p, is_custom):
     results = []
     shortlist_keys = []
     
-    for col in df_c.columns:
+    for col in df_c_all.columns:
         if col == "^JKSE" or pd.isna(col): continue
-        c, v, h, l = df_c[col].dropna(), df_v[col].dropna(), df_h[col].dropna(), df_l[col].dropna()
+        c, v, h, l = df_c_all[col].dropna(), df_v[col].dropna(), df_h[col].dropna(), df_l[col].dropna()
         if len(c) < 30: continue
         
         last_price = c.iloc[-1]
-        
-        # LOGIKA IGNORE: Jika user input saham manual (is_custom_selection), bypass filter harga
-        if not is_custom_selection:
+        if not is_custom: # Jika tidak pilih manual, filter harga berlaku
             if not (min_p <= last_price <= max_p): continue
 
         ticker = str(col).replace('.JK','')
@@ -89,100 +87,79 @@ def run_full_analysis(df_c, df_v, df_h, df_l, mode_source, min_p, max_p, is_cust
         # ARA & Vol Control (Source 2 & 3)
         daily_pct = c.pct_change() * 100
         max_g = daily_pct.tail(252).max()
-        count_ara = (daily_pct.tail(252) > 20).sum()
         vol_control = (v_ratio / (v_ratio + 1)) * 100
 
-        # Logika Shortlist
+        # Filter Shortlist
         if mode_source == "Source 1: MFI & Big Vol":
-            if last_price > ma20 and mfi_val < 65 and v_ratio > 1.3:
-                shortlist_keys.append(ticker)
+            if last_price > ma20 and mfi_val < 65 and v_ratio > 1.3: shortlist_keys.append(ticker)
         elif mode_source == "Source 2: ARA & 12M Hist":
-            if count_ara > 0 and v_ratio > 1.2:
-                shortlist_keys.append(ticker)
-        else: # Source 3 Split View
-            if vol_control > 70 and last_price > c.iloc[-2]:
-                shortlist_keys.append(ticker)
+            if (daily_pct.tail(252) > 20).sum() > 0: shortlist_keys.append(ticker)
+        else: # Source 3
+            if vol_control > 70 and last_price > c.iloc[-2]: shortlist_keys.append(ticker)
 
         results.append({
-            'Kode Saham': ticker,
-            'Last Price': int(last_price),
-            'MFI (14D)': round(mfi_val, 2),
-            'Vol Control (%)': f"{vol_control:.1f}%",
-            'Max Gain': f"{max_g:.1f}%",
-            'Freq ARA': int(count_ara),
-            'Vol Ratio': round(v_ratio, 2),
-            'Above MA20': "YA" if last_price > ma20 else "TIDAK"
+            'Kode Saham': ticker, 'Last Price': int(last_price),
+            'MFI (14D)': round(mfi_val, 2), 'Vol Control (%)': f"{vol_control:.1f}%",
+            'Max Gain': f"{max_g:.1f}%", 'Vol Ratio': round(v_ratio, 2)
         })
-        
     return pd.DataFrame(results), shortlist_keys
 
-# --- 5. SIDEBAR UI ---
+# --- 5. SIDEBAR ---
 st.sidebar.header("⚙️ Konfigurasi")
+pilih_source = st.sidebar.selectbox("Pilih Sumber Analisa:", ["Source 1: MFI & Big Vol", "Source 2: ARA & 12M Hist", "Source 3: Split View (Akumulasi)"])
 
-pilih_source = st.sidebar.selectbox(
-    "Pilih Sumber Analisa:",
-    ["Source 1: MFI & Big Vol", "Source 2: ARA & 12M Hist", "Source 3: Split View (Akumulasi)"]
-)
-
-# FILTER HARGA
 col_p1, col_p2 = st.sidebar.columns(2)
-with col_p1:
-    min_price = st.number_input("Harga Min", value=50, step=50)
-with col_p2:
-    max_price = st.number_input("Harga Max", value=10000, step=100)
+with col_p1: min_price = st.number_input("Harga Min", value=50, step=50)
+with col_p2: max_price = st.number_input("Harga Max", value=10000, step=100)
 
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
-selected_tickers = st.sidebar.multiselect("Pilih Saham (Prioritas):", options=target_list)
+selected_tickers = st.sidebar.multiselect("Pilih Saham (Bypass Filter Harga):", options=target_list)
 
-start_d = st.sidebar.date_input("Mulai", date.today() - timedelta(days=30))
-end_d = st.sidebar.date_input("Akhir", date.today())
+start_d = st.sidebar.date_input("Mulai", date(2025, 10, 1)) # Default 1 Okt
+end_d = st.sidebar.date_input("Akhir", date(2025, 12, 31))  # Default 31 Des
 
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True)
 
 # --- 6. OUTPUT ---
 if btn_analisa:
-    with st.spinner('Memproses data...'):
-        # Cek apakah user memasukkan saham secara manual
+    with st.spinner('Menarik data harian aktif...'):
         is_custom = True if selected_tickers else False
         active_list = selected_tickers if is_custom else target_list
-        
         tickers_jk = [t + ".JK" for t in active_list]
-        df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
         
-        if not df_c.empty:
-            df_res, shortlist = run_full_analysis(df_c, df_v, df_h, df_l, pilih_source, min_price, max_price, is_custom)
-            df_s = df_res[df_res['Kode Saham'].isin(shortlist)]
+        # df_c_all (data panjang untuk indikator), df_c_filt (data range pilihan user)
+        df_c_all, df_v, df_h, df_l, df_c_filt = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
+        
+        if not df_c_filt.empty:
+            df_res, shortlist = run_full_analysis(df_c_all, df_v, df_h, df_l, pilih_source, min_price, max_price, is_custom)
             
-            # DASHBOARD TABS
-            tab_an, tab_pct, tab_prc = st.tabs(["📊 Hasil Analisa", "📈 Split View (%)", "💰 Split View Harga"])
+            tab_an, tab_pct, tab_prc = st.tabs(["📊 Analisa", "📈 Split View Persentase (%)", "💰 Split View Harga (IDR)"])
             
             with tab_an:
                 st.subheader(f"🎯 Shortlist ({pilih_source})")
-                if is_custom:
-                    st.caption("⚠️ Harga Min/Max diabaikan karena saham dipilih secara manual.")
-                st.dataframe(df_s, use_container_width=True)
-                st.subheader("🔍 Data Lengkap")
-                st.dataframe(df_res, use_container_width=True)
+                st.dataframe(df_res[df_res['Kode Saham'].isin(shortlist)], use_container_width=True)
             
             with tab_pct:
-                df_pct_v = (df_c.pct_change() * 100).tail(15)
-                df_pct_v.index = df_pct_v.index.strftime('%d/%m/%Y')
-                st.dataframe(df_pct_v.T.style.format("{:.2f}%"), use_container_width=True)
+                st.subheader(f"📈 Histori Persentase ({start_d} s/d {end_d})")
+                # Hitung perubahan harian khusus pada range yang dipilih
+                df_pct_range = (df_c_filt.pct_change() * 100)
+                df_pct_range.index = df_pct_range.index.strftime('%d/%m/%Y')
+                # Tampilkan dengan warna
+                st.dataframe(df_pct_range.T.style.applymap(style_percentage), use_container_width=True)
                 
             with tab_prc:
-                df_prc_v = df_c.tail(15)
-                df_prc_v.index = df_prc_v.index.strftime('%d/%m/%Y')
-                st.dataframe(df_prc_v.T, use_container_width=True)
+                st.subheader(f"💰 Histori Harga Nominal ({start_d} s/d {end_d})")
+                df_prc_view = df_c_filt.copy()
+                df_prc_view.index = df_prc_view.index.strftime('%d/%m/%Y')
+                st.dataframe(df_prc_view.T, use_container_width=True)
 
-            # DOWNLOAD
-            st.sidebar.markdown("---")
-            excel_data = generate_combined_report(df_s, df_res, df_c)
-            st.sidebar.download_button(
-                label=f"📥 Download Report Excel",
-                data=excel_data,
-                file_name=f"Report_Analisa_{date.today()}.xlsx",
-                mime="application/vnd.ms-excel",
-                use_container_width=True
-            )
-else:
-    st.info(f"Database aktif: {loaded_file}")
+            # DOWNLOAD REPORT
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_res.to_excel(writer, index=False, sheet_name='Analisa')
+                (df_c_filt.pct_change()*100).to_excel(writer, sheet_name='Histori_Persentase')
+                df_c_filt.to_excel(writer, sheet_name='Histori_Harga')
+            
+            st.sidebar.download_button("📥 Download Excel", data=output.getvalue(), file_name=f"Report_{start_d}_{end_d}.xlsx")
+        else:
+            st.error("Data tidak ditemukan pada periode tersebut.")
