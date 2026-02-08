@@ -28,7 +28,6 @@ def fetch_yf_all_data(tickers, start_date, end_date):
         df = yf.download(all_tickers, start=extended_start, end=end_date, threads=True, progress=False)
         if df.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
-        # Filter range tanggal user
         mask = (df.index.date >= start_date) & (df.index.date <= end_date)
         df_filtered = df.loc[mask]
         
@@ -56,52 +55,85 @@ def load_data_auto():
 
 df_emiten, loaded_file = load_data_auto()
 
-# --- 4. LOGIKA ANALISA ---
+# --- 4. LOGIKA ANALISA GABUNGAN ---
 def run_full_analysis(df_c_all, df_v, df_h, df_l, mode_source, min_p, max_p, is_custom):
     results = []
     shortlist_keys = []
+    
     for col in df_c_all.columns:
         if col == "^JKSE" or pd.isna(col): continue
         c, v, h, l = df_c_all[col].dropna(), df_v[col].dropna(), df_h[col].dropna(), df_l[col].dropna()
         if len(c) < 30: continue
+        
         last_price = c.iloc[-1]
+        # Bypass filter harga jika saham dipilih secara manual
         if not is_custom:
             if not (min_p <= last_price <= max_p): continue
+
         ticker = str(col).replace('.JK','')
-        v_ratio = v.iloc[-1] / v.rolling(5).mean().iloc[-1] if len(v) > 5 else 0
+        ma20 = c.rolling(20).mean().iloc[-1]
+        v_sma5 = v.rolling(5).mean().iloc[-1]
+        v_ratio = v.iloc[-1] / v_sma5 if v_sma5 > 0 else 0
         
-        # Contoh Filter Shortlist Sederhana
-        if v_ratio > 1.5 and last_price > c.rolling(20).mean().iloc[-1]:
-            shortlist_keys.append(ticker)
+        # MFI (Source 1)
+        tp = (h + l + c) / 3
+        mf = tp * v
+        pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
+        neg_mf = (mf.where(tp < tp.shift(1), 0)).rolling(14).sum()
+        mfi_val = 100 - (100 / (1 + (pos_mf / neg_mf))).iloc[-1] if not neg_mf.empty and neg_mf.iloc[-1] != 0 else 50.0
+
+        # ARA & Vol Control (Source 2 & 3)
+        daily_pct = c.pct_change() * 100
+        max_g = daily_pct.tail(252).max()
+        count_ara = (daily_pct.tail(252) > 20).sum()
+        vol_control = (v_ratio / (v_ratio + 1)) * 100
+
+        # Logika Shortlist Sesuai Wording Source
+        if mode_source == "Source 1: MFI & Big Volume (12 Jan)":
+            if last_price > ma20 and mfi_val < 65 and v_ratio > 1.3: shortlist_keys.append(ticker)
+        elif mode_source == "Source 2: ARA & Histori 12M (7 Jan)":
+            if count_ara > 0 and v_ratio > 1.2: shortlist_keys.append(ticker)
+        else: # Source 3
+            if vol_control > 70 and last_price > c.iloc[-2]: shortlist_keys.append(ticker)
 
         results.append({
             'Kode Saham': ticker, 'Last Price': int(last_price),
-            'Vol Ratio': round(v_ratio, 2)
+            'MFI (14D)': round(mfi_val, 2), 'Vol Control (%)': f"{vol_control:.1f}%",
+            'Freq ARA': int(count_ara), 'Vol Ratio': round(v_ratio, 2)
         })
     return pd.DataFrame(results), shortlist_keys
 
 # --- 5. SIDEBAR ---
 st.sidebar.header("⚙️ Konfigurasi")
-pilih_source = st.sidebar.selectbox("Pilih Sumber Analisa:", ["Source 1", "Source 2", "Source 3"])
 
-# OPSI TIMEFRAME (DAILY/WEEKLY)
-timeframe = st.sidebar.radio("Timeframe View:", ["Daily", "Weekly"], horizontal=True)
+# WORDING SOURCE LENGKAP
+pilih_source = st.sidebar.selectbox(
+    "Pilih Sumber Analisa:", 
+    [
+        "Source 1: MFI & Big Volume (12 Jan)", 
+        "Source 2: ARA & Histori 12M (7 Jan)", 
+        "Source 3: Split View Akumulasi (5 Jan)"
+    ]
+)
+
+# OPSI TIMEFRAME
+timeframe = st.sidebar.radio("View Timeframe:", ["Daily", "Weekly"], horizontal=True)
 
 col_p1, col_p2 = st.sidebar.columns(2)
-with col_p1: min_price = st.number_input("Harga Min", value=50)
-with col_p2: max_price = st.number_input("Harga Max", value=10000)
+with col_p1: min_price = st.number_input("Harga Min", value=50, step=50)
+with col_p2: max_price = st.number_input("Harga Max", value=10000, step=100)
 
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
-selected_tickers = st.sidebar.multiselect("Pilih Saham (Bypass Harga):", options=target_list)
+selected_tickers = st.sidebar.multiselect("Pilih Saham (Bypass Filter):", options=target_list)
 
 start_d = st.sidebar.date_input("Mulai", date(2025, 10, 1))
 end_d = st.sidebar.date_input("Akhir", date(2025, 12, 31))
 
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True)
 
-# --- 6. OUTPUT DASHBOARD ---
+# --- 6. OUTPUT ---
 if btn_analisa:
-    with st.spinner(f'Menghitung data {timeframe}...'):
+    with st.spinner(f'Memproses {timeframe} data...'):
         is_custom = True if selected_tickers else False
         active_list = selected_tickers if is_custom else target_list
         tickers_jk = [t + ".JK" for t in active_list]
@@ -109,9 +141,8 @@ if btn_analisa:
         df_c_all, df_v, df_h, df_l, df_c_filt = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
         
         if not df_c_filt.empty:
-            # --- PROSES RESAMPLING JIKA WEEKLY ---
+            # Resampling jika Weekly
             if timeframe == "Weekly":
-                # 'W-FRI' artinya penutupan minggu di hari Jumat
                 df_view_price = df_c_filt.resample('W-FRI').last()
             else:
                 df_view_price = df_c_filt.copy()
@@ -125,7 +156,7 @@ if btn_analisa:
                 st.dataframe(df_res[df_res['Kode Saham'].isin(shortlist)], use_container_width=True)
             
             with tab_pct:
-                st.subheader(f"📈 Histori Persentase {timeframe} ({start_d} s/d {end_d})")
+                st.subheader(f"📈 Histori {timeframe} (%)")
                 df_pct_view = (df_view_price.pct_change() * 100)
                 df_pct_view.index = df_pct_view.index.strftime('%d/%m/%Y')
                 
@@ -136,18 +167,19 @@ if btn_analisa:
                 )
                 
             with tab_prc:
-                st.subheader(f"💰 Histori Harga {timeframe}")
+                st.subheader(f"💰 Histori {timeframe} (IDR)")
                 df_prc_view = df_view_price.copy()
                 df_prc_view.index = df_prc_view.index.strftime('%d/%m/%Y')
                 st.dataframe(df_prc_view.T.style.format("{:,.0f}"), use_container_width=True)
 
-            # EXPORT EXCEL
+            # EXPORT
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_res.to_excel(writer, index=False, sheet_name='Analisa')
-                df_pct_view.to_excel(writer, sheet_name=f'Histori_Pct_{timeframe}')
-                df_view_price.to_excel(writer, sheet_name=f'Histori_Harga_{timeframe}')
+                df_pct_view.to_excel(writer, sheet_name='Histori_Persentase')
             
-            st.sidebar.download_button("📥 Download Excel", data=output.getvalue(), file_name=f"Report_{timeframe}_{start_d}.xlsx")
+            st.sidebar.download_button("📥 Download Report", data=output.getvalue(), file_name=f"Report_{timeframe}_{start_d}.xlsx")
         else:
             st.error("Data tidak ditemukan.")
+else:
+    st.info(f"Database aktif: {loaded_file}")
