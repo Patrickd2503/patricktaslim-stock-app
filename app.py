@@ -5,17 +5,15 @@ import numpy as np
 from datetime import date, timedelta
 import os
 from io import BytesIO
-
-# NEW: Library untuk indikator teknikal
 import pandas_ta as pta
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI Ultra v12", layout="wide")
-st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v12 – Siap Terbang Edition")
+st.set_page_config(page_title="Monitor Saham BEI Ultra v12.1", layout="wide")
+st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v12.1 – ADX Enhanced")
 
-st.markdown("**Update utama:** ADX + RSI + 20D Breakout + Shortlist jauh lebih ketat")
+st.markdown("**Update v12.1:** ADX Trend + ADX Strength + Divergence Warning ditambahkan")
 
-# --- 1. FITUR CACHE DATA ---
+# --- 1. CACHE DATA ---
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
     all_tickers = list(tickers) + ["^JKSE"]
@@ -57,7 +55,7 @@ def load_data_auto():
 
 df_emiten, loaded_file = load_data_auto()
 
-# --- 3. FUNGSI STYLING ---
+# --- 3. STYLING ---
 def style_mfi(val):
     try:
         num = float(val)
@@ -91,8 +89,18 @@ def style_rel_vol(val):
 def style_adx(val):
     try:
         num = float(val)
-        if num >= 25: return 'background-color: #0066ff; color: white'
+        if num >= 40: return 'background-color: #0066ff; color: white; font-weight: bold'
+        if num >= 25: return 'background-color: #00aaff; color: white'
     except: pass
+    return ''
+
+def style_adx_trend(val):
+    if val == "Rising": return 'color: #00cc00; font-weight: bold'
+    if val == "Falling": return 'color: #ff4b4b; font-weight: bold'
+    return ''
+
+def style_divergence(val):
+    if "Bearish" in str(val): return 'background-color: rgba(255, 100, 100, 0.3); font-weight: bold'
     return ''
 
 def to_excel_report(df_short, df_all):
@@ -102,7 +110,7 @@ def to_excel_report(df_short, df_all):
         df_all.to_excel(writer, index=False, sheet_name='Semua Analisa')
     return output.getvalue()
 
-# --- 4. FUNGSI ANALISA UTAMA (v12) ---
+# --- 4. FUNGSI ANALISA UTAMA v12.1 ---
 def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
     results, shortlist_keys = [], []
     min_vol_lembar = min_vol_lot * 100
@@ -121,7 +129,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
 
         rel_vol = v.iloc[-1] / avg_vol20 if avg_vol20 > 0 else 0.0
         p_change_today = ((c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]) * 100
-        
+
         # Consecutive Up Days
         consecutive_up = 0
         for i in range(1, 6):
@@ -130,23 +138,45 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
             else:
                 break
 
-        # === INDIKATOR BARU ===
+        # === INDIKATOR TEKNIKAL ===
         rsi_series = pta.rsi(close=c, length=14)
         last_rsi = rsi_series.iloc[-1] if not rsi_series.empty else 50.0
 
         adx_df = pta.adx(high=h, low=l, close=c, length=14)
         last_adx = adx_df['ADX_14'].iloc[-1] if not adx_df.empty else 0.0
 
+        # ADX Trend & Divergence
+        if len(adx_df) >= 6:
+            adx_change_5d = last_adx - adx_df['ADX_14'].iloc[-6]
+            adx_trend = "Rising" if adx_change_5d > 2 else "Falling" if adx_change_5d < -2 else "Flat"
+        else:
+            adx_trend = "Flat"
+            adx_change_5d = 0
+
+        # Simple Bearish Divergence Warning
+        price_up_recent = c.iloc[-1] > c.iloc[-6] if len(c) >= 6 else False
+        adx_falling_high = (adx_trend == "Falling" and last_adx > 30)
+        divergence_warning = "Bearish Divergence Warning" if price_up_recent and adx_falling_high else ""
+
+        # ADX Strength Category
+        if last_adx >= 45:
+            adx_strength = "Very Strong"
+        elif last_adx >= 30:
+            adx_strength = "Strong"
+        elif last_adx >= 22:
+            adx_strength = "Moderate"
+        else:
+            adx_strength = "Weak"
+
         high_20 = h.rolling(20).max().iloc[-1]
         is_breakout = "YA" if c.iloc[-1] >= high_20 * 0.99 else "TIDAK"
         dist_20high = round((c.iloc[-1] / high_20 - 1) * 100, 2) if high_20 > 0 else 0.0
 
-        # === MFI ===
+        # MFI
         tp = (h + l + c) / 3
         mf = tp * v
         pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
         neg_mf = (mf.where(tp < tp.shift(1), 0)).rolling(14).sum()
-        
         mfi_series = 100 - (100 / (1 + (pos_mf / neg_mf).replace([np.inf, -np.inf], np.nan)))
         last_mfi = mfi_series.iloc[-1] if not mfi_series.empty else 50.0
         mfi_change_5d = (last_mfi - mfi_series.iloc[-6]) if len(mfi_series) >= 6 else 0.0
@@ -154,20 +184,16 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         ma20 = c.rolling(20).mean().iloc[-1]
         is_above_ma20 = "YA" if c.iloc[-1] > ma20 else "TIDAK"
 
-        # === PVA (lebih ketat) ===
-        pva = "Neutral"
-        if p_change_today > 1.0 and rel_vol > 2.0: 
-            pva = "Strong Bullish Vol"
-        elif p_change_today > 0.5 and rel_vol > 1.5: 
-            pva = "Bullish Vol"
-        elif p_change_today < -0.6 and rel_vol > 1.5: 
-            pva = "Bearish Vol"
+        # PVA
+        pva = "Strong Bullish Vol" if (p_change_today > 1.0 and rel_vol > 2.0) else \
+              "Bullish Vol" if (p_change_today > 0.5 and rel_vol > 1.5) else \
+              "Bearish Vol" if (p_change_today < -0.6 and rel_vol > 1.5) else "Neutral"
 
         ticker_name = str(col).replace('.JK','').upper()
         stock_perf = (c.iloc[-1] - c.iloc[-20]) / c.iloc[-20] if len(c) >= 20 else 0
         rs = "Outperform" if stock_perf > ihsg_perf else "Underperform"
 
-        # === REASONS ===
+        # Reasons
         reasons = []
         if rel_vol >= 2.0 and p_change_today > 1.0:
             reasons.append("Extreme Volume Surge")
@@ -175,18 +201,19 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
             reasons.append("Above MA20 + MFI Fresh")
         if consecutive_up >= 3 and mfi_change_5d > 8.0:
             reasons.append("Consec Up + MFI Rising")
-        if last_adx > 25 and last_mfi > 55 and mfi_change_5d > 8.0:
+        if last_adx > 25 and last_mfi > 55 and mfi_change_5d > 8.0 and adx_trend in ["Rising", "Flat"]:
             reasons.append("Strong Trend + MFI Rising")
         if is_above_ma20 == "YA" and last_rsi < 75 and is_breakout == "YA":
             reasons.append("Above MA20 + Breakout")
 
-        # === SHORTLIST LOGIC (Ketat) ===
+        # Shortlist Logic (lebih aman dengan ADX)
         is_shortlist = False
         if (len(reasons) >= 3 and 
             rs == "Outperform" and 
             is_above_ma20 == "YA" and 
             last_mfi < 80 and 
-            last_adx > 22):
+            last_adx >= 22 and 
+            adx_trend != "Falling"):        # Hindari jika ADX sudah jatuh
             is_shortlist = True
             shortlist_keys.append(ticker_name)
 
@@ -197,6 +224,9 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
             'MFI Change 5D': float(mfi_change_5d),
             'RSI (14)': float(last_rsi),
             'ADX (14)': float(last_adx),
+            'ADX Trend': adx_trend,
+            'ADX Strength': adx_strength,
+            'Divergence Warning': divergence_warning,
             'PVA': pva,
             'Market RS': rs,
             'Above MA20': is_above_ma20,
@@ -213,7 +243,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
     return df_results, shortlist_keys
 
 # --- 5. SIDEBAR ---
-st.sidebar.header("⚙️ Konfigurasi v12")
+st.sidebar.header("⚙️ Konfigurasi v12.1")
 
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
 selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", options=target_list)
@@ -240,7 +270,7 @@ btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=Tru
 
 # --- 6. OUTPUT ---
 if btn_analisa:
-    with st.spinner('Menganalisa market...'):
+    with st.spinner('Menganalisa market... (ADX Enhanced aktif)'):
         active_list = selected_tickers if selected_tickers else target_list
         tickers_jk = [k + ".JK" for k in active_list]
         df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
@@ -273,7 +303,7 @@ if btn_analisa:
                 'Dist to 20D High (%)': "{:.2f}%"
             }
 
-            st.subheader("🔥 Smart Money Shortlist v12 (Siap Terbang)")
+            st.subheader("🔥 Smart Money Shortlist v12.1 (ADX Enhanced)")
             df_s = df_res[df_res['Kode Saham'].isin(shortlist)] if not df_res.empty else pd.DataFrame()
             
             if not df_s.empty:
@@ -285,11 +315,13 @@ if btn_analisa:
                     .map(style_ma_filter, subset=['Above MA20'])
                     .map(style_rel_vol, subset=['Rel Vol'])
                     .map(style_adx, subset=['ADX (14)'])
+                    .map(style_adx_trend, subset=['ADX Trend'])
+                    .map(style_divergence, subset=['Divergence Warning'])
                     .format(format_dict),
                     use_container_width=True
                 )
             else:
-                st.info("Belum ada kandidat yang memenuhi kriteria super ketat hari ini.")
+                st.info("Belum ada kandidat yang memenuhi kriteria ketat hari ini.")
 
             st.markdown("---")
             st.subheader("🔍 Seluruh Hasil Analisa")
@@ -303,20 +335,21 @@ if btn_analisa:
                     .map(style_ma_filter, subset=['Above MA20'])
                     .map(style_rel_vol, subset=['Rel Vol'])
                     .map(style_adx, subset=['ADX (14)'])
+                    .map(style_adx_trend, subset=['ADX Trend'])
+                    .map(style_divergence, subset=['Divergence Warning'])
                     .format(format_dict),
-                    use_container_width=True, height=500
+                    use_container_width=True, height=600
                 )
 
             excel_data = to_excel_report(df_s, df_res)
             st.sidebar.download_button(
-                label="📥 Download Report Excel v12",
+                label="📥 Download Report Excel v12.1",
                 data=excel_data,
-                file_name=f"Analisa_BEI_{date.today()}_v12.xlsx",
+                file_name=f"Analisa_BEI_{date.today()}_v12.1.xlsx",
                 mime="application/vnd.ms-excel"
             )
         else:
             st.error("Data gagal diambil untuk range tanggal tersebut.")
 else:
     st.info(f"Siap menganalisa menggunakan: {loaded_file}\n\n"
-            f"✅ Sudah ditambahkan: ADX, RSI, 20D Breakout\n"
-            f"✅ Shortlist lebih ketat untuk saham yang siap terbang")
+            f"✅ ADX sudah ditingkatkan dengan Trend, Strength, dan Divergence Warning")
