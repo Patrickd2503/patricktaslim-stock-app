@@ -6,7 +6,7 @@ from datetime import date, timedelta
 import os
 from io import BytesIO
 
-# NEW: Library untuk indikator teknikal (wajib di-install: pip install pandas-ta)
+# NEW: Library untuk indikator teknikal
 import pandas_ta as pta
 
 # --- CONFIG DASHBOARD ---
@@ -57,7 +57,7 @@ def load_data_auto():
 
 df_emiten, loaded_file = load_data_auto()
 
-# --- 3. FUNGSI STYLING & EXPORT ---
+# --- 3. FUNGSI STYLING ---
 def style_mfi(val):
     try:
         num = float(val)
@@ -79,13 +79,6 @@ def style_pva(val):
 def style_ma_filter(val):
     if val == 'YA': return 'color: green; font-weight: bold;'
     return 'color: red;'
-
-def style_percentage(val):
-    try:
-        if val > 0: return 'color: green'
-        elif val < 0: return 'color: red'
-    except: pass
-    return ''
 
 def style_rel_vol(val):
     try:
@@ -109,7 +102,7 @@ def to_excel_report(df_short, df_all):
         df_all.to_excel(writer, index=False, sheet_name='Semua Analisa')
     return output.getvalue()
 
-# --- 4. FUNGSI ANALISA UTAMA (SUDAH DIMODIFIKASI SESUAI SARAN) ---
+# --- 4. FUNGSI ANALISA UTAMA (v12) ---
 def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
     results, shortlist_keys = [], []
     min_vol_lembar = min_vol_lot * 100
@@ -128,6 +121,8 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
 
         rel_vol = v.iloc[-1] / avg_vol20 if avg_vol20 > 0 else 0.0
         p_change_today = ((c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]) * 100
+        
+        # Consecutive Up Days
         consecutive_up = 0
         for i in range(1, 6):
             if len(c) > i and c.iloc[-i] > c.iloc[-i-1]:
@@ -135,7 +130,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
             else:
                 break
 
-        # === INDIKATOR BARU (ADX, RSI, 20D Breakout) ===
+        # === INDIKATOR BARU ===
         rsi_series = pta.rsi(close=c, length=14)
         last_rsi = rsi_series.iloc[-1] if not rsi_series.empty else 50.0
 
@@ -143,10 +138,10 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         last_adx = adx_df['ADX_14'].iloc[-1] if not adx_df.empty else 0.0
 
         high_20 = h.rolling(20).max().iloc[-1]
-        is_breakout = "YA" if c.iloc[-1] >= high_20 * 0.99 else "TIDAK"   # mendekati atau breakout
+        is_breakout = "YA" if c.iloc[-1] >= high_20 * 0.99 else "TIDAK"
         dist_20high = round((c.iloc[-1] / high_20 - 1) * 100, 2) if high_20 > 0 else 0.0
 
-        # === MFI (tetap sama) ===
+        # === MFI ===
         tp = (h + l + c) / 3
         mf = tp * v
         pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
@@ -159,7 +154,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         ma20 = c.rolling(20).mean().iloc[-1]
         is_above_ma20 = "YA" if c.iloc[-1] > ma20 else "TIDAK"
 
-        # === PVA (lebih ketat sesuai saran) ===
+        # === PVA (lebih ketat) ===
         pva = "Neutral"
         if p_change_today > 1.0 and rel_vol > 2.0: 
             pva = "Strong Bullish Vol"
@@ -172,7 +167,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         stock_perf = (c.iloc[-1] - c.iloc[-20]) / c.iloc[-20] if len(c) >= 20 else 0
         rs = "Outperform" if stock_perf > ihsg_perf else "Underperform"
 
-        # === REASONS BARU & LEBIH KETAT ===
+        # === REASONS ===
         reasons = []
         if rel_vol >= 2.0 and p_change_today > 1.0:
             reasons.append("Extreme Volume Surge")
@@ -185,7 +180,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         if is_above_ma20 == "YA" and last_rsi < 75 and is_breakout == "YA":
             reasons.append("Above MA20 + Breakout")
 
-        # === KRITERIA SHORTLIST BARU (sangat ketat) ===
+        # === SHORTLIST LOGIC (Ketat) ===
         is_shortlist = False
         if (len(reasons) >= 3 and 
             rs == "Outperform" and 
@@ -217,7 +212,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
     df_results = pd.DataFrame(results)
     return df_results, shortlist_keys
 
-# --- 5. UI SIDEBAR (DITAMBAH FILTER BARU) ---
+# --- 5. SIDEBAR ---
 st.sidebar.header("⚙️ Konfigurasi v12")
 
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
@@ -228,7 +223,6 @@ max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
 min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=100000)
 max_ff = float(st.sidebar.slider("Maximal Free Float (%)", 0.0, 100.0, 100.0))
 
-# === FILTER BARU UNTUK "SIAP TERBANG" ===
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Filter Siap Terbang")
 min_mfi_change = st.sidebar.number_input("Min MFI Change 5D", value=8.0, step=0.5)
@@ -246,7 +240,7 @@ btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=Tru
 
 # --- 6. OUTPUT ---
 if btn_analisa:
-    with st.spinner('Menganalisa market... (ADX + RSI + Breakout aktif)'):
+    with st.spinner('Menganalisa market...'):
         active_list = selected_tickers if selected_tickers else target_list
         tickers_jk = [k + ".JK" for k in active_list]
         df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
@@ -254,7 +248,7 @@ if btn_analisa:
         if not df_c.empty:
             df_res, shortlist = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, min_vol_lot)
             
-            # === FILTER UTAMA + FILTER BARU ===
+            # Filter
             if not df_res.empty:
                 df_res = df_res[
                     (df_res['Last Price'] >= min_p) & 
@@ -312,10 +306,7 @@ if btn_analisa:
                     .format(format_dict),
                     use_container_width=True, height=500
                 )
-            else:
-                st.warning("Tidak ada data yang memenuhi kriteria filter.")
 
-            # Download
             excel_data = to_excel_report(df_s, df_res)
             st.sidebar.download_button(
                 label="📥 Download Report Excel v12",
@@ -323,11 +314,9 @@ if btn_analisa:
                 file_name=f"Analisa_BEI_{date.today()}_v12.xlsx",
                 mime="application/vnd.ms-excel"
             )
-
         else:
             st.error("Data gagal diambil untuk range tanggal tersebut.")
 else:
     st.info(f"Siap menganalisa menggunakan: {loaded_file}\n\n"
             f"✅ Sudah ditambahkan: ADX, RSI, 20D Breakout\n"
-            f"✅ Shortlist jauh lebih ketat (minimal 3 reason + Outperform + Above MA20)")
-</FILE>
+            f"✅ Shortlist lebih ketat untuk saham yang siap terbang")
