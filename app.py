@@ -1,4 +1,3 @@
-<FILE filename="Monitor_Saham_BEI_Ultra_v12.py">
 import streamlit as st
 import yfinance as yf
 import pandas as pd
