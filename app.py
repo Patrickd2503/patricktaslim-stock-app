@@ -8,9 +8,9 @@ import os
 from io import BytesIO
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI Ultra v16", layout="wide")
-st.title("🛡️ Conservative Smart Money Scanner")
-st.markdown("### Fokus: Akumulasi Awal & Anti-Pucuk")
+st.set_page_config(page_title="Monitor Saham BEI Ultra v17", layout="wide")
+st.title("🛡️ Full-Feature Conservative Scanner")
+st.markdown("### Fokus: Akumulasi Awal, Anti-Pucuk & Full Sidebar Control")
 
 # --- 1. FITUR CACHE DATA ---
 @st.cache_data(ttl=3600)
@@ -52,12 +52,13 @@ df_emiten, loaded_file = load_data_auto()
 def to_excel_report(df_short, df_all):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_short.to_excel(writer, index=False, sheet_name='Shortlist_Pilihan')
+        if not df_short.empty:
+            df_short.to_excel(writer, index=False, sheet_name='Shortlist_Pilihan')
         df_all.to_excel(writer, index=False, sheet_name='Semua_Analisa')
     return output.getvalue()
 
-# --- 4. LOGIKA ANALISA CONSERVATIVE ---
-def get_conservative_signals(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
+# --- 4. LOGIKA ANALISA EARLY-BIRD ---
+def get_analysis_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
     results = []
     ff_lookup = dict(zip(df_ref['Kode Saham'], df_ref['Free Float']))
     
@@ -66,7 +67,6 @@ def get_conservative_signals(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         c, v, h, l = df_c[col].dropna(), df_v[col].dropna(), df_h[col].dropna(), df_l[col].dropna()
         if len(c) < 40: continue 
         
-        # Kalkulasi Dasar
         avg_vol20 = v.rolling(20).mean().iloc[-1]
         if avg_vol20 < (min_vol_lot * 100): continue
         
@@ -74,14 +74,14 @@ def get_conservative_signals(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         p_change = ((c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]) * 100
         turnover = (c.iloc[-1] * v.iloc[-1]) / 1_000_000_000
 
-        # RSI (Relative Strength Index) untuk deteksi Overbought
+        # RSI untuk Anti-Pucuk
         delta = c.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs_idx = gain / loss
-        rsi = 100 - (100 / (1 + rs_idx.iloc[-1])) if not pd.isna(rs_idx.iloc[-1]) else 50
+        rs_idx = gain / (loss + 0.000001)
+        rsi = 100 - (100 / (1 + rs_idx.iloc[-1]))
 
-        # Money Flow Index (MFI)
+        # MFI (Money Flow Index)
         tp = (h + l + c) / 3
         mf = tp * v
         pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
@@ -89,103 +89,115 @@ def get_conservative_signals(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         mfi_series = 100 - (100 / (1 + (pos_mf / neg_mf).fillna(0)))
         last_mfi = mfi_series.iloc[-1]
         mfi_change_5d = last_mfi - mfi_series.iloc[-6] if len(mfi_series) > 6 else 0
-        
         ma20 = c.rolling(20).mean().iloc[-1]
 
-        # --- FILTER LOGIC: CONSERVATIVE & ANTI-PUCUK ---
+        # --- LOGIKA SHORTLIST (AND) ---
         reasons = []
-        
-        # SYARAT KEAMANAN:
-        # 1. RSI < 65 (Belum Jenuh Beli)
-        # 2. Price Change hari ini < 7% (Belum terlanjur terbang tinggi)
-        is_safe_entry = rsi < 65 and p_change < 7.0
+        # Syarat "Early Bird": RSI < 65 dan Kenaikan harga harian < 8%
+        is_early = rsi < 65 and p_change < 8.0
 
-        if is_safe_entry:
-            # Kondisi A: Akumulasi Kuat di Area Bawah/Samping
+        if is_early:
             if rel_vol >= 2.5 and mfi_change_5d > 12.0:
-                reasons.append("Early Acc: Extreme Vol + Money Flow")
-            
-            # Kondisi B: Fresh Breakout MA20
-            elif rel_vol >= 1.8 and c.iloc[-1] > ma20 and c.iloc[-2] <= ma20 and last_mfi < 60:
-                reasons.append("Fresh Breakout: New Trend Confirmed")
+                reasons.append("Strong Acc: Low Risk Entry")
+            elif rel_vol >= 1.8 and c.iloc[-1] > ma20 and c.iloc[-2] <= ma20:
+                reasons.append("MA20 Breakout: Trend Start")
 
-        if reasons:
-            ticker_name = str(col).replace('.JK','').upper()
-            results.append({
-                'Kode Saham': ticker_name,
-                'Free Float (%)': float(ff_lookup.get(ticker_name, 0.0)),
-                'Last Price': int(c.iloc[-1]),
-                'Price Change (%)': p_change,
-                'RSI (14D)': rsi,
-                'MFI (14D)': last_mfi,
-                'Rel Vol': rel_vol,
-                'Turnover (M)': turnover,
-                'Status': ", ".join(reasons)
-            })
+        ticker_name = str(col).replace('.JK','').upper()
+        results.append({
+            'Kode Saham': ticker_name,
+            'Free Float (%)': float(ff_lookup.get(ticker_name, 0.0)),
+            'Last Price': int(c.iloc[-1]),
+            'Price Change (%)': p_change,
+            'RSI (14D)': rsi,
+            'MFI (14D)': last_mfi,
+            'Rel Vol': rel_vol,
+            'Turnover (M)': turnover,
+            'Shortlist Reasons': ", ".join(reasons) if reasons else ""
+        })
 
     return pd.DataFrame(results)
 
-# --- 5. UI SIDEBAR ---
-st.sidebar.header("⚙️ Proteksi Modal")
+# --- 5. SIDEBAR (SEMUA MENU DIKEMBALIKAN) ---
+st.sidebar.header("⚙️ Kontrol Navigasi")
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
 selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosong = Semua):", options=target_list)
 
-min_turnover = st.sidebar.number_input("Min Transaksi/Hari (Miliar)", value=10.0) # Naikkan ke 10M untuk keamanan
-max_ff = st.sidebar.slider("Max Free Float (%)", 0, 100, 35) # Bandar lebih suka FF kecil
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 Filter Harga & Likuiditas")
+min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=100)
+max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
+min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=50000)
+min_turnover = st.sidebar.number_input("Min Transaksi/Hari (Miliar)", value=10.0)
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("🛡️ Proteksi Pucuk")
+max_rsi = st.sidebar.slider("Max RSI (Anti Overbought)", 30, 85, 65)
+max_ff = st.sidebar.slider("Max Free Float (%)", 0, 100, 35)
+
+st.sidebar.markdown("---")
 today = date.today()
-start_d = today - timedelta(days=30)
-end_d = today
+start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=30))
+end_d = st.sidebar.date_input("Tanggal Akhir", today)
 
-btn_analisa = st.sidebar.button("🚀 SCAN SAHAM PILIHAN", use_container_width=True)
+btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA PENUH", use_container_width=True)
 
-# --- 6. OUTPUT ---
+# --- 6. OUTPUT & DASHBOARD ---
 if btn_analisa:
-    with st.spinner('Memfilter anomali yang belum pucuk...'):
+    with st.spinner('Menghitung data pasar...'):
         active_list = selected_tickers if selected_tickers else target_list
         tickers_jk = [k + ".JK" for k in active_list]
         df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
         
         if not df_c.empty:
-            df_res = get_conservative_signals(df_c, df_v, df_h, df_l, df_emiten, 50000)
+            df_res = get_analysis_data(df_c, df_v, df_h, df_l, df_emiten, min_vol_lot)
             
             if not df_res.empty:
-                # Filter tambahan dari Sidebar
-                df_final = df_res[
-                    (df_res['Turnover (M)'] >= min_turnover) & 
-                    (df_res['Free Float (%)'] <= max_ff)
-                ].sort_values('Rel Vol', ascending=False)
-                
-                if not df_final.empty:
-                    st.success(f"Ditemukan {len(df_final)} Saham Potensial yang Belum Overbought")
-                    st.dataframe(
-                        df_final.style.format({
-                            'Price Change (%)': "{:.2f}%",
-                            'RSI (14D)': "{:.2f}",
-                            'MFI (14D)': "{:.2f}",
-                            'Rel Vol': "{:.2f}x",
-                            'Turnover (M)': "{:.2f}B"
-                        }), 
-                        use_container_width=True
-                    )
-                    
-                    # Visualisasi Chart
-                    top_ticker = df_final.iloc[0]['Kode Saham']
-                    fig = go.Figure(data=[go.Candlestick(
-                        x=df_c.index,
-                        open=df_h[f"{top_ticker}.JK"]*0.99, # Simulasi harga open
-                        high=df_h[f"{top_ticker}.JK"],
-                        low=df_l[f"{top_ticker}.JK"],
-                        close=df_c[f"{top_ticker}.JK"]
-                    )])
-                    fig.update_layout(title=f"Price Action: {top_ticker}", template="plotly_dark")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("Tidak ada saham yang lolos kriteria keamanan (Mungkin market sudah terlalu 'pucuk').")
-            else:
-                st.info("Tidak ditemukan anomali volume pada saham yang harganya masih rendah.")
+                # Filter berdasarkan Sidebar
+                df_res = df_res[
+                    (df_res['Last Price'] >= min_p) & 
+                    (df_res['Last Price'] <= max_p) &
+                    (df_res['Turnover (M)'] >= min_turnover) &
+                    (df_res['Free Float (%)'] <= max_ff) &
+                    (df_res['RSI (14D)'] <= max_rsi)
+                ]
 
-            excel_data = to_excel_report(df_final if 'df_final' in locals() else pd.DataFrame(), df_res)
-            st.sidebar.download_button(label="📥 Download Analisa", data=excel_data, file_name=f"Conservative_Scan_{date.today()}.xlsx")
+            st.subheader("💎 Shortlist: Saham Akumulasi Area Bawah")
+            df_s = df_res[df_res['Shortlist Reasons'] != ""].sort_values('Rel Vol', ascending=False)
+            
+            if not df_s.empty:
+                st.dataframe(
+                    df_s.style.format({
+                        'Price Change (%)': "{:.2f}%",
+                        'RSI (14D)': "{:.2f}",
+                        'MFI (14D)': "{:.2f}",
+                        'Rel Vol': "{:.2f}x",
+                        'Turnover (M)': "{:.2f}B"
+                    }), use_container_width=True
+                )
+                
+                # Chart Interaktif
+                top_t = df_s.iloc[0]['Kode Saham']
+                fig = go.Figure(data=[go.Candlestick(x=df_c.index, open=df_c[f"{top_t}.JK"]*0.99, high=df_h[f"{top_t}.JK"], low=df_l[f"{top_t}.JK"], close=df_c[f"{top_t}.JK"])])
+                fig.update_layout(title=f"Analisis Teknikal: {top_t}", template="plotly_dark", height=450)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Tidak ada saham yang memenuhi kriteria Early-Bird hari ini.")
+
+            st.markdown("---")
+            st.subheader("🔍 Database Hasil Screening Seluruhnya")
+            st.dataframe(
+                df_res.style.format({
+                    'Price Change (%)': "{:.2f}%",
+                    'RSI (14D)': "{:.2f}",
+                    'Rel Vol': "{:.2f}x",
+                    'Turnover (M)': "{:.2f}B"
+                }), use_container_width=True, height=400
+            )
+
+            # Tombol Download di Sidebar
+            excel_data = to_excel_report(df_s, df_res)
+            st.sidebar.download_button(label="📥 Download Excel", data=excel_data, file_name=f"Full_Analisa_{date.today()}.xlsx")
+        else:
+            st.error("Data gagal ditarik dari server Yahoo Finance.")
 else:
-    st.info(f"Screener v16 (Early-Bird) Siap. Menggunakan Database: {loaded_file}")
+    st.info(f"Screener Full v17 Siap. Database: {loaded_file}")
