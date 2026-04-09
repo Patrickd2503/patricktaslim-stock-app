@@ -79,7 +79,7 @@ def to_excel_report(df_short, df_all):
 
 # --- 4. LOGIKA ANALISA ---
 def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
-    results, shortlist_keys = [], []
+    results = []
     min_vol_lembar = min_vol_lot * 100
     ff_lookup = dict(zip(df_ref['Kode Saham'], df_ref['Free Float']))
     
@@ -140,8 +140,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
             'Shortlist Reasons': ", ".join(reasons) if reasons else ""
         })
 
-    df_results = pd.DataFrame(results)
-    return df_results
+    return pd.DataFrame(results)
 
 # --- 5. UI SIDEBAR ---
 st.sidebar.header("⚙️ Konfigurasi")
@@ -201,7 +200,17 @@ if btn_analisa:
 
             st.markdown("---")
             st.subheader("🔍 Database Hasil Screening")
-            st.dataframe(df_res.format({'Rel Vol': "{:.2f}x", 'Turnover (M)': "{:.2f}B"}), use_container_width=True, height=400)
+            # FIX: Gunakan .style.format() untuk menghindari AttributeError
+            st.dataframe(
+                df_res.style.format({
+                    'Rel Vol': "{:.2f}x", 
+                    'Turnover (M)': "{:.2f}B",
+                    'Free Float (%)': "{:.2f}%",
+                    'MFI (14D)': "{:.2f}"
+                }), 
+                use_container_width=True, 
+                height=400
+            )
 
             excel_data = to_excel_report(df_s, df_res)
             st.sidebar.download_button(label="📥 Download Excel", data=excel_data, file_name=f"Analisa_{date.today()}.xlsx")
