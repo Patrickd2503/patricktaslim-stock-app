@@ -8,8 +8,9 @@ import os
 from io import BytesIO
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI Ultra v12", layout="wide")
-st.title("🎯 Smart Money Monitor: Akumulasi & Visualisasi")
+st.set_page_config(page_title="Monitor Saham BEI Ultra v13", layout="wide")
+st.title("🎯 High Precision Smart Money Monitor")
+st.markdown("---")
 
 # --- 1. FITUR CACHE DATA ---
 @st.cache_data(ttl=3600)
@@ -42,18 +43,15 @@ def load_data_auto():
                     df['Free Float'] = pd.to_numeric(df['Free Float'], errors='coerce').fillna(0)
                     if df['Free Float'].max() <= 1.0 and df['Free Float'].max() > 0:
                         df['Free Float'] = df['Free Float'] * 100
-                else:
-                    df['Free Float'] = 0
                 return df, file_name
         except Exception as e:
             st.error(f"Gagal membaca file {file_name}: {e}")
     
-    default_data = pd.DataFrame({'Kode Saham': ['WINS', 'CNKO', 'KOIN'], 'Free Float': [30.0, 45.0, 20.0]})
-    return default_data, "Default Mode"
+    return pd.DataFrame({'Kode Saham': ['WINS', 'AKRA', 'TLKM'], 'Free Float': [30.0, 32.0, 47.0]}), "Default Mode"
 
 df_emiten, loaded_file = load_data_auto()
 
-# --- 3. FUNGSI STYLING & EXPORT ---
+# --- 3. FUNGSI STYLING ---
 def style_mfi(val):
     try:
         num = float(val)
@@ -62,22 +60,14 @@ def style_mfi(val):
     except: pass
     return ''
 
-def style_rel_vol(val):
-    try:
-        num = float(val)
-        if num >= 2.0: return 'background-color: #00cc00; color: white'
-        if num >= 1.5: return 'background-color: #66ff66;'
-    except: pass
-    return ''
-
 def to_excel_report(df_short, df_all):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_short.to_excel(writer, index=False, sheet_name='Shortlist')
-        df_all.to_excel(writer, index=False, sheet_name='Semua Analisa')
+        df_short.to_excel(writer, index=False, sheet_name='Shortlist_Ketat')
+        df_all.to_excel(writer, index=False, sheet_name='Semua_Analisa')
     return output.getvalue()
 
-# --- 4. LOGIKA ANALISA ---
+# --- 4. LOGIKA ANALISA DENGAN PARAMETER "AND" KETAT ---
 def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
     results = []
     min_vol_lembar = min_vol_lot * 100
@@ -97,124 +87,126 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
 
         rel_vol = v.iloc[-1] / avg_vol20
         p_change_today = ((c.iloc[-1] - c.iloc[-2]) / c.iloc[-2]) * 100
-        daily_turnover = c.iloc[-1] * v.iloc[-1]
+        daily_turnover = (c.iloc[-1] * v.iloc[-1]) / 1_000_000_000 # Turnover dlm Miliar
 
-        # Perbaikan Error Handling MFI (Menghindari DivByZero)
+        # Kalkulasi MFI
         tp = (h + l + c) / 3
         mf = tp * v
         pos_mf = (mf.where(tp > tp.shift(1), 0)).rolling(14).sum()
         neg_mf = (mf.where(tp < tp.shift(1), 0.000001)).rolling(14).sum()
-        
         mfi_series = 100 - (100 / (1 + (pos_mf / neg_mf).replace([np.inf, -np.inf], np.nan).fillna(0)))
+        
         last_mfi = mfi_series.iloc[-1] if not mfi_series.empty else 50.0
         mfi_change_5d = (last_mfi - mfi_series.iloc[-6]) if len(mfi_series) >= 6 else 0.0
-
         ma20 = c.rolling(20).mean().iloc[-1]
-        is_above_ma20 = "YA" if c.iloc[-1] > ma20 else "TIDAK"
 
-        pva = "Neutral"
-        if p_change_today > 0.8 and rel_vol > 1.6: pva = "Strong Bullish Vol"
-        elif p_change_today > 0.4 and rel_vol > 1.3: pva = "Bullish Vol"
-        elif p_change_today < -0.6 and rel_vol > 1.5: pva = "Bearish Vol"
+        # --- PARAMETER KETAT (LOGIKA AND) ---
+        reasons = []
+        
+        # Kondisi A: High Conviction Accumulation (Volume Spike + Arus Uang Masuk)
+        if rel_vol >= 2.0 and mfi_change_5d > 8.0:
+            reasons.append("Big Money In (Vol & MFI Surge)")
+        
+        # Kondisi B: Bullish Breakout (Harga Tembus MA20 + Volume Konfirmasi)
+        if c.iloc[-1] > ma20 and c.iloc[-2] <= ma20 and rel_vol > 1.5:
+            reasons.append("Structural Breakout (Price & Vol)")
+        
+        # Kondisi C: Reversal (MFI Sangat Rendah tapi mulai Naik + Volume Bangun)
+        if last_mfi < 35 and mfi_change_5d > 5.0 and rel_vol > 1.2:
+            reasons.append("Potential Reversal (Low MFI Recovery)")
 
         ticker_name = str(col).replace('.JK','').upper()
         stock_perf = (c.iloc[-1] - c.iloc[-20]) / c.iloc[-20] if len(c) >= 20 else 0
         rs = "Outperform" if stock_perf > ihsg_perf else "Underperform"
 
-        reasons = []
-        if rel_vol >= 1.8 and p_change_today > 0.5: reasons.append("High Rel Vol + Price Up")
-        if is_above_ma20 == "YA" and last_mfi < 55: reasons.append("Above MA20 + MFI Fresh")
-        if mfi_change_5d > 3.5: reasons.append("MFI Rising")
-
         results.append({
             'Kode Saham': ticker_name,
             'Free Float (%)': float(ff_lookup.get(ticker_name, 0.0)),
             'MFI (14D)': float(last_mfi),
-            'PVA': pva,
+            'Price Change (%)': float(p_change_today),
             'Market RS': rs,
-            'Above MA20': is_above_ma20,
+            'Above MA20': "YA" if c.iloc[-1] > ma20 else "TIDAK",
             'Last Price': int(c.iloc[-1]),
             'Rel Vol': float(rel_vol),
-            'Turnover (M)': daily_turnover / 1_000_000_000,
-            'AvgVol20 (Lot)': int(avg_vol20 / 100),
+            'Turnover (M)': daily_turnover,
             'Shortlist Reasons': ", ".join(reasons) if reasons else ""
         })
 
     return pd.DataFrame(results)
 
 # --- 5. UI SIDEBAR ---
-st.sidebar.header("⚙️ Konfigurasi")
+st.sidebar.header("⚙️ Filter Ketat")
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
 selected_tickers = st.sidebar.multiselect("Pilih Saham (Kosongkan = Semua):", options=target_list)
 
-min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=50)
-max_p = st.sidebar.number_input("Harga Maksimal (Rp)", value=25000)
-min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=50000)
-min_turnover = st.sidebar.number_input("Min Transaksi/Hari (Miliar Rp)", value=1.0)
-max_ff = float(st.sidebar.slider("Maximal Free Float (%)", 0.0, 100.0, 100.0))
+min_p = st.sidebar.number_input("Harga Minimal (Rp)", value=100)
+min_turnover = st.sidebar.number_input("Min Transaksi/Hari (Miliar Rp)", value=5.0) # Diperketat ke 5M
+max_ff = float(st.sidebar.slider("Maximal Free Float (%)", 0.0, 100.0, 45.0)) # Diperketat ke 45%
 
 today = date.today()
 start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=30))
 end_d = st.sidebar.date_input("Tanggal Akhir", today)
 
-btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True)
+btn_analisa = st.sidebar.button("🚀 MULAI SCANNING KETAT", use_container_width=True)
 
-# --- 6. OUTPUT & VISUALISASI ---
+# --- 6. OUTPUT ---
 if btn_analisa:
-    with st.spinner('Menganalisa market...'):
+    with st.spinner('Memfilter saham high-probability...'):
         active_list = selected_tickers if selected_tickers else target_list
         tickers_jk = [k + ".JK" for k in active_list]
         df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
         
         if not df_c.empty:
-            df_res = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, min_vol_lot)
+            df_res = get_signals_and_data(df_c, df_v, df_h, df_l, df_emiten, 50000) # Min 50rb lot
             
-            if not df_res.empty:
-                df_res = df_res[
-                    (df_res['Last Price'] >= min_p) & 
-                    (df_res['Last Price'] <= max_p) & 
-                    (df_res['Free Float (%)'] <= max_ff) &
-                    (df_res['Turnover (M)'] >= min_turnover)
-                ]
+            # Filter Dasar di UI
+            df_res = df_res[
+                (df_res['Last Price'] >= min_p) & 
+                (df_res['Free Float (%)'] <= max_ff) &
+                (df_res['Turnover (M)'] >= min_turnover)
+            ]
 
-            st.subheader("🔥 Smart Money Shortlist")
+            # Tampilan Shortlist
+            st.subheader("💎 Saham Pilihan Utama (High Precision)")
             df_s = df_res[df_res['Shortlist Reasons'] != ""].sort_values('Rel Vol', ascending=False)
             
             if not df_s.empty:
-                st.dataframe(df_s.style.map(style_mfi, subset=['MFI (14D)'])
-                             .map(style_rel_vol, subset=['Rel Vol'])
-                             .format({'Rel Vol': "{:.2f}x", 'Turnover (M)': "{:.2f}B", 'Free Float (%)': "{:.2f}%"}), 
-                             use_container_width=True)
+                st.dataframe(
+                    df_s.style.map(style_mfi, subset=['MFI (14D)'])
+                    .format({
+                        'Rel Vol': "{:.2f}x", 
+                        'Turnover (M)': "{:.2f}B", 
+                        'Free Float (%)': "{:.2f}%",
+                        'Price Change (%)': "{:.2f}%",
+                        'MFI (14D)': "{:.2f}"
+                    }), 
+                    use_container_width=True
+                )
                 
-                # Visualisasi: Chart Interaktif
-                st.markdown("---")
+                # Visualisasi Chart Saham Teratas
                 top_ticker = df_s.iloc[0]['Kode Saham']
-                st.subheader(f"📈 Visual Analisis: {top_ticker}")
-                ticker_full = f"{top_ticker}.JK"
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df_c.index, y=df_c[ticker_full], mode='lines', name='Price', line=dict(color='#00ff00')))
-                fig.update_layout(title=f"Trend Harga {top_ticker}", template="plotly_dark", height=400)
+                fig.add_trace(go.Scatter(x=df_c.index, y=df_c[f"{top_ticker}.JK"], name='Close'))
+                fig.update_layout(title=f"Chart Harga: {top_ticker}", template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("Tidak ada saham yang memenuhi kriteria akumulasi.")
+                st.info("Tidak ada saham yang memenuhi kriteria kombinasi ketat hari ini.")
 
             st.markdown("---")
-            st.subheader("🔍 Database Hasil Screening")
-            # FIX: Gunakan .style.format() untuk menghindari AttributeError
+            st.subheader("🔍 Seluruh Database Analisa")
             st.dataframe(
                 df_res.style.format({
                     'Rel Vol': "{:.2f}x", 
                     'Turnover (M)': "{:.2f}B",
-                    'Free Float (%)': "{:.2f}%",
-                    'MFI (14D)': "{:.2f}"
+                    'Price Change (%)': "{:.2f}%"
                 }), 
                 use_container_width=True, 
                 height=400
             )
 
             excel_data = to_excel_report(df_s, df_res)
-            st.sidebar.download_button(label="📥 Download Excel", data=excel_data, file_name=f"Analisa_{date.today()}.xlsx")
+            st.sidebar.download_button(label="📥 Download Hasil", data=excel_data, file_name=f"Precision_Scan_{date.today()}.xlsx")
         else:
-            st.error("Data tidak ditemukan.")
+            st.error("Gagal menarik data.")
 else:
-    st.info(f"Screener siap. Database: {loaded_file}")
+    st.info(f"Screener v13 Ready. Menggunakan Database: {loaded_file}")
