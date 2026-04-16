@@ -4,18 +4,20 @@ import pandas as pd
 import numpy as np
 from datetime import date, timedelta
 import os
+from io import BytesIO
 import pandas_ta as pta
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI v13 + Visual", layout="wide")
-st.title("🚀 Smart Money Monitor v13 – Visual Edition")
+st.set_page_config(page_title="Monitor Saham BEI v13", layout="wide")
+st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v13 – Precision Edition")
 
 st.markdown("""
-**Update v13 + Visual:**
-- ✅ **Chart Recommendation** (New): Deteksi High Risk (Illiquid) & Overextended.
-- ✅ **ADX DI+ vs DI-**: Filter tren bullish.
-- ✅ **No Bearish Divergence**: Filter otomatis reversal.
-- ✅ **Rel Vol 50D**: Baseline volume lebih stabil.
+**Update v13 + Visual Analysis:**
+- ✅ **Chart Recommendation** 🆕: Deteksi otomatis High Risk (Illiquid/Patah) & Overextended.
+- ✅ ADX pakai **DI+ vs DI-** (arah tren benar-benar bullish)
+- ✅ **Bearish Divergence** otomatis tolak dari Shortlist
+- ✅ ADX Trend **Falling** tidak masuk shortlist
+- ✅ Relative Volume dibandingkan **50D** juga
 """)
 
 # ─────────────────────────────────────────────
@@ -37,16 +39,16 @@ def analyze_chart_visual(close, high, low):
     dist_ma20 = (last_p - ma20) / ma20 * 100
     
     if dead_bars >= 4:
-        return "❌ High Risk", "Chart patah-patah/tidak likuid."
+        return "❌ High Risk", "Chart patah-patah/tidak likuid (Hati-hati!)."
     elif dist_ma20 > 15:
-        return "⚠️ Overextended", f"Terlalu jauh dari MA20 ({dist_ma20:.1f}%)."
+        return "⚠️ Overextended", f"Sudah naik terlalu jauh dari MA20 (+{dist_ma20:.1f}%)."
     elif last_p > ma20:
         return "✅ Healthy", "Struktur chart rapi & uptrend."
     else:
-        return "➡️ Neutral", "Chart konsolidasi/sideways."
+        return "➡️ Neutral", "Chart konsolidasi atau sideways."
 
 # ─────────────────────────────────────────────
-# 2. DATA FETCHING (v13 Original)
+# 2. CACHE DATA (v13 Original)
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, start_date, end_date):
@@ -56,76 +58,116 @@ def fetch_yf_all_data(tickers, start_date, end_date):
         df = yf.download(all_tickers, start=extended_start, end=end_date, threads=True, progress=False)
         return df
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error download data: {e}")
         return None
 
 # ─────────────────────────────────────────────
-# 3. CORE STRATEGY (v13 Original + Visual Feature)
+# 3. LOAD DATABASE EMITEN
 # ─────────────────────────────────────────────
 def load_emiten():
     if os.path.exists('FreeFloat.xlsx'):
-        df = pd.read_excel('FreeFloat.xlsx')
-        return df, "FreeFloat.xlsx"
-    return pd.DataFrame({'Kode Saham': ['BBCA','BUKA','KPIG']}), "Default List"
+        try:
+            df = pd.read_excel('FreeFloat.xlsx')
+            df.columns = df.columns.str.strip()
+            df['Kode Saham'] = df['Kode Saham'].astype(str).str.strip().str.upper().str.replace('.JK','',regex=False)
+            if 'Free Float' in df.columns:
+                df['Free Float'] = pd.to_numeric(df['Free Float'], errors='coerce').fillna(0)
+                if df['Free Float'].max() <= 1.0:
+                    df['Free Float'] = df['Free Float'] * 100
+            else:
+                df['Free Float'] = 0
+            return df, "FreeFloat.xlsx"
+        except Exception as e:
+            st.error(f"Error membaca file Excel: {e}")
+    
+    # Default jika file tidak ada
+    return pd.DataFrame({'Kode Saham': ['BBCA','BBRI','TLKM','ASII','BUKA','KPIG'], 'Free Float': [0]*6}), "Default (No File)"
 
 df_emiten, loaded_file = load_emiten()
 
-# --- SIDEBAR ---
-st.sidebar.header("Filter v13")
-min_vol_lot = st.sidebar.number_input("Min Avg Vol (Lot)", value=10000)
-exclude_falling_adx = st.sidebar.checkbox("Exclude Falling ADX", value=True)
+# ─────────────────────────────────────────────
+# 4. SIDEBAR (v13 Original)
+# ─────────────────────────────────────────────
+st.sidebar.header("📊 Filter Screener")
+min_p = st.sidebar.number_input("Harga Minimal", value=50)
+max_ff = st.sidebar.slider("Max Free Float (%)", 0.0, 100.0, 100.0)
+min_vol_lot = st.sidebar.number_input("Min Avg Vol 20D (LOT)", value=10000)
+exclude_falling_adx = st.sidebar.checkbox("Exclude Falling ADX Trend", value=True)
+exclude_dist = st.sidebar.checkbox("Exclude Distribusi (PVA)", value=True)
 
-if st.sidebar.button("RUN MONITOR"):
-    with st.spinner("Analyzing..."):
-        tickers = [t + ".JK" for t in df_emiten['Kode Saham'].tolist()]
-        raw_data = fetch_yf_all_data(tickers, date.today() - timedelta(days=60), date.today())
+if st.sidebar.button("🕵️ JALANKAN MONITOR v13"):
+    with st.spinner("Sedang menganalisa seluruh emiten..."):
+        ticker_list = [t + ".JK" for t in df_emiten['Kode Saham'].tolist()]
+        raw_data = fetch_yf_all_data(ticker_list, date.today() - timedelta(days=60), date.today())
         
-        if raw_data is not None:
+        if raw_data is not None and not raw_data.empty:
             results = []
-            for t in df_emiten['Kode Saham'].tolist():
+            
+            # Ambil IHSG untuk RS
+            try:
+                jkse_c = raw_data['Close']['^JKSE'].dropna()
+            except:
+                jkse_c = None
+
+            for t_code in df_emiten['Kode Saham'].tolist():
                 try:
-                    symbol = t + ".JK"
-                    # Handle MultiIndex
-                    if isinstance(raw_data.columns, pd.MultiIndex):
-                        c = raw_data['Close'][symbol].dropna()
-                        h = raw_data['High'][symbol].dropna()
-                        l = raw_data['Low'][symbol].dropna()
-                        v = raw_data['Volume'][symbol].dropna()
-                    else:
-                        c, h, l, v = raw_data['Close'], raw_data['High'], raw_data['Low'], raw_data['Volume']
-
+                    symbol = t_code + ".JK"
+                    # Ambil data per kolom (handling MultiIndex yfinance)
+                    c = raw_data['Close'][symbol].dropna()
+                    h = raw_data['High'][symbol].dropna()
+                    l = raw_data['Low'][symbol].dropna()
+                    v = raw_data['Volume'][symbol].dropna()
+                    
                     if len(c) < 60: continue
-
-                    # TECHNICAL v13
+                    
+                    # 1. ANALISA TEKNIKAL v13 (ADX & MFI)
                     adx_df = pta.adx(h, l, c, length=14)
                     adx_val = adx_df['ADX_14'].iloc[-1]
                     dmp = adx_df['DMP_14'].iloc[-1]
                     dmn = adx_df['DMN_14'].iloc[-1]
                     adx_trend = "Rising" if adx_val > adx_df['ADX_14'].iloc[-2] else "Falling"
                     
-                    mfi = pta.mfi(h, l, c, v, length=14).iloc[-1]
+                    mfi_val = pta.mfi(h, l, c, v, length=14).iloc[-1]
                     
-                    # NEW: VISUAL ANALYSIS
+                    # 2. NEW: ANALISA CHART VISUAL
                     chart_rec, chart_note = analyze_chart_visual(c, h, l)
 
-                    # FILTERS v13
+                    # 3. FILTER v13
                     if exclude_falling_adx and adx_trend == "Falling": continue
-                    if dmp < dmn: continue # Bullish only
+                    if dmp < dmn: continue # Hanya yang Bullish (DI+ > DI-)
                     
+                    # Cek Bearish Divergence (v13)
+                    is_bear_div = (c.iloc[-1] > c.iloc[-10:-1].max()) and (mfi_val < pta.mfi(h, l, c, v, length=14).iloc[-10:-1].max())
+                    if is_bear_div: continue
+
+                    # 4. KUMPULKAN HASIL
                     results.append({
-                        'Ticker': t,
-                        'Visual Rec': chart_rec, # KOLOM BARU
+                        'Kode': t_code,
+                        'Chart Rec': chart_rec, # KOLOM BARU
                         'Price': int(c.iloc[-1]),
                         'ADX': round(adx_val, 1),
                         'ADX Trend': adx_trend,
-                        'MFI': round(mfi, 1),
+                        'MFI': round(mfi_val, 1),
                         'RelVol 50D': round(v.iloc[-1] / v.rolling(50).mean().iloc[-1], 2),
-                        'Visual Note': chart_note # KOLOM BARU
+                        'Chart Note': chart_note # KOLOM BARU
                     })
                 except:
                     continue
             
             if results:
-                st.dataframe(pd.DataFrame(results), use_container_width=True)
+                st.subheader(f"✅ Shortlist v13 - {date.today()}")
+                df_res = pd.DataFrame(results).sort_values('ADX', ascending=False)
+                
+                # Styling
+                def style_chart(val):
+                    color = 'red' if '❌' in str(val) or '⚠️' in str(val) else ('green' if '✅' in str(val) else 'gray')
+                    return f'color: {color}; font-weight: bold'
+
+                st.dataframe(df_res.style.applymap(style_chart, subset=['Chart Rec']), use_container_width=True)
             else:
-                st.info("Tidak ada saham lolos kriteria v13.")
+                st.info("Tidak ada saham yang lolos kriteria v13 saat ini.")
+        else:
+            st.error("Gagal menarik data dari Yahoo Finance.")
+
+else:
+    st.info(f"📂 Database: **{loaded_file}** | Silakan klik tombol di sidebar untuk mulai.")
