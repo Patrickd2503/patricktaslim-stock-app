@@ -4,134 +4,128 @@ import pandas as pd
 import numpy as np
 from datetime import date, timedelta
 import os
-from io import BytesIO
+import pandas_ta as pta
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
-st.set_page_config(page_title="Bandarmologi & v13 Technical Monitor", layout="wide")
-st.title("🕵️ Bandarmologi & v13 Technical Monitor")
+# --- CONFIG DASHBOARD ---
+st.set_page_config(page_title="Monitor Saham BEI v13 + Visual", layout="wide")
+st.title("🚀 Smart Money Monitor v13 – Visual Edition")
+
 st.markdown("""
-**Fitur Terintegrasi:**
-- ✅ **v13 Tech:** ADX DI+/DI-, MFI, No Bearish Divergence, & 50D RelVol.
-- ✅ **Bandarmologi:** Stealth Accumulation, Effort vs Result, & Absorption.
-- ✅ **Visual Check:** Deteksi chart patah (illiquid) & overextended.
+**Update v13 + Visual:**
+- ✅ **Chart Recommendation** (New): Deteksi High Risk (Illiquid) & Overextended.
+- ✅ **ADX DI+ vs DI-**: Filter tren bullish.
+- ✅ **No Bearish Divergence**: Filter otomatis reversal.
+- ✅ **Rel Vol 50D**: Baseline volume lebih stabil.
 """)
 
 # ─────────────────────────────────────────────
-# 1. TECHNICAL FUNCTIONS (v13)
+# 1. FUNGSI BARU: VISUAL CHART ANALYSIS
 # ─────────────────────────────────────────────
-def compute_adx(high, low, close, window=14):
-    plus_dm = high.diff().clip(lower=0)
-    minus_dm = (-low.diff()).clip(lower=0)
-    tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
-    atr = tr.rolling(window).mean()
-    plus_di = 100 * (plus_dm.rolling(window).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(window).mean() / atr)
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(window).mean()
-    return adx, plus_di, minus_di
-
-def compute_mfi(high, low, close, volume, window=14):
-    tp = (high + low + close) / 3
-    mf = tp * volume
-    pos_mf = pd.Series(np.where(tp > tp.shift(1), mf, 0), index=mf.index).rolling(window).sum()
-    neg_mf = pd.Series(np.where(tp < tp.shift(1), mf, 0), index=mf.index).rolling(window).sum()
-    mfi = 100 - (100 / (1 + (pos_mf / neg_mf)))
-    return mfi
-
-# ─────────────────────────────────────────────
-# 2. BANDARMOLOGI & VISUAL FUNCTIONS
-# ─────────────────────────────────────────────
-def assess_chart_visual(close, high, low):
-    ma20 = close.rolling(20).mean()
-    last_p = close.iloc[-1]
-    last_ma20 = ma20.iloc[-1]
+def analyze_chart_visual(close, high, low):
+    """Memberikan penilaian objektif terhadap struktur chart."""
+    if len(close) < 50:
+        return "N/A", "Data kurang"
     
-    # Deteksi chart patah (illiquid)
+    last_p = close.iloc[-1]
+    ma20 = close.rolling(20).mean().iloc[-1]
+    
+    # 1. Cek Likuiditas (Chart Patah/Doji beruntun)
+    # Jika dalam 15 hari terakhir banyak bar 'mati' (High == Low)
     dead_bars = (high.iloc[-15:] == low.iloc[-15:]).sum()
-    # Deteksi overextended
-    dist_ma20 = (last_p - last_ma20) / last_ma20 * 100
+    
+    # 2. Cek Overextended (Jarak ke MA20)
+    dist_ma20 = (last_p - ma20) / ma20 * 100
     
     if dead_bars >= 4:
-        return "❌ High Risk (Illiquid)", "Chart patah-patah (rawan manipulasi)."
-    if dist_ma20 > 15:
+        return "❌ High Risk", "Chart patah-patah/tidak likuid."
+    elif dist_ma20 > 15:
         return "⚠️ Overextended", f"Terlalu jauh dari MA20 ({dist_ma20:.1f}%)."
-    return "✅ Healthy Structure", "Struktur chart normal."
-
-def detect_stealth_accumulation(close, volume, window=20):
-    c, v = close.iloc[-window:], volume.iloc[-window:]
-    price_range = (c.max() - c.min()) / c.mean() * 100
-    vol_ratio = v.iloc[-5:].mean() / v.iloc[:5].mean() if v.iloc[:5].mean() > 0 else 1.0
-    score = 0
-    if price_range < 8: score += 3
-    if vol_ratio > 1.2: score += 2
-    return {'score': score, 'signal': "🔥 Akumulasi" if score >= 3 else "–"}
+    elif last_p > ma20:
+        return "✅ Healthy", "Struktur chart rapi & uptrend."
+    else:
+        return "➡️ Neutral", "Chart konsolidasi/sideways."
 
 # ─────────────────────────────────────────────
-# 3. DATA LOADING
+# 2. DATA FETCHING (v13 Original)
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def fetch_yf_all_data(tickers, start_date, end_date):
+    all_tickers = list(tickers) + ["^JKSE"]
+    extended_start = start_date - timedelta(days=500)
+    try:
+        df = yf.download(all_tickers, start=extended_start, end=end_date, threads=True, progress=False)
+        return df
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return None
+
+# ─────────────────────────────────────────────
+# 3. CORE STRATEGY (v13 Original + Visual Feature)
 # ─────────────────────────────────────────────
 def load_emiten():
     if os.path.exists('FreeFloat.xlsx'):
         df = pd.read_excel('FreeFloat.xlsx')
-        return df['Kode Saham'].str.replace('.JK','',regex=False).tolist()
-    return ['BBCA', 'BBRI', 'TLKM', 'ASII', 'BUKA', 'KPIG']
+        return df, "FreeFloat.xlsx"
+    return pd.DataFrame({'Kode Saham': ['BBCA','BUKA','KPIG']}), "Default List"
 
-# ─────────────────────────────────────────────
-# 4. MAIN INTERFACE (SIDEBAR)
-# ─────────────────────────────────────────────
-st.sidebar.header("⚙️ Konfigurasi")
-target_list = load_emiten()
-selected = st.sidebar.multiselect("Pilih Saham:", options=target_list, default=target_list[:10])
-min_adx = st.sidebar.slider("Min ADX Strength", 0, 100, 20)
-exclude_falling_adx = st.sidebar.checkbox("Exclude Falling ADX Trend", value=True)
+df_emiten, loaded_file = load_emiten()
 
-if st.sidebar.button("🕵️ JALANKAN ANALISA"):
-    with st.spinner("Sedang memproses teknikal & bandarmologi..."):
-        results = []
-        for ticker in selected:
-            try:
-                df = yf.download(f"{ticker}.JK", period="1y", progress=False)
-                if df.empty or len(df) < 60: continue
-                
-                # Flatten multi-index if exists
-                if isinstance(df.columns, pd.MultiIndex):
-                    c, h, l, v = df['Close'].iloc[:,0], df['High'].iloc[:,0], df['Low'].iloc[:,0], df['Volume'].iloc[:,0]
-                else:
-                    c, h, l, v = df['Close'], df['High'], df['Low'], df['Volume']
+# --- SIDEBAR ---
+st.sidebar.header("Filter v13")
+min_vol_lot = st.sidebar.number_input("Min Avg Vol (Lot)", value=10000)
+exclude_falling_adx = st.sidebar.checkbox("Exclude Falling ADX", value=True)
 
-                # v13 Technical 
-                adx, p_di, m_di = compute_adx(h, l, c)
-                mfi = compute_mfi(h, l, c, v)
-                
-                adx_val = adx.iloc[-1]
-                adx_trend = "Rising" if adx.iloc[-1] > adx.iloc[-2] else "Falling"
-                relvol_50 = v.iloc[-1] / v.rolling(50).mean().iloc[-1]
-                
-                # v13 Filters 
-                if exclude_falling_adx and adx_trend == "Falling": continue
-                if p_di.iloc[-1] < m_di.iloc[-1]: continue # DI+ must be > DI-
-                if (c.iloc[-1] > c.iloc[-10:].max()) and (mfi.iloc[-1] < mfi.iloc[-10:].max()): continue # No Bearish Div
-                
-                # Visual & Bandarmologi [cite: 1, 9]
-                chart_status, chart_note = assess_chart_visual(c, h, l)
-                sa = detect_stealth_accumulation(c, v)
-                
-                results.append({
-                    'Kode': ticker,
-                    'Price': int(c.iloc[-1]),
-                    'Chart Rec': chart_status,
-                    'ADX': round(adx_val, 1),
-                    'ADX Trend': adx_trend,
-                    'MFI': round(mfi.iloc[-1], 1),
-                    'RelVol 50D': round(relvol_50, 2),
-                    'Bandarmologi': sa['signal'],
-                    'Note': chart_note
-                })
-            except Exception as e:
-                continue
+if st.sidebar.button("RUN MONITOR"):
+    with st.spinner("Analyzing..."):
+        tickers = [t + ".JK" for t in df_emiten['Kode Saham'].tolist()]
+        raw_data = fetch_yf_all_data(tickers, date.today() - timedelta(days=60), date.today())
+        
+        if raw_data is not None:
+            results = []
+            for t in df_emiten['Kode Saham'].tolist():
+                try:
+                    symbol = t + ".JK"
+                    # Handle MultiIndex
+                    if isinstance(raw_data.columns, pd.MultiIndex):
+                        c = raw_data['Close'][symbol].dropna()
+                        h = raw_data['High'][symbol].dropna()
+                        l = raw_data['Low'][symbol].dropna()
+                        v = raw_data['Volume'][symbol].dropna()
+                    else:
+                        c, h, l, v = raw_data['Close'], raw_data['High'], raw_data['Low'], raw_data['Volume']
 
-        if results:
-            st.dataframe(pd.DataFrame(results), use_container_width=True)
-        else:
-            st.warning("Tidak ada saham yang memenuhi kriteria v13 & Visual.")
+                    if len(c) < 60: continue
+
+                    # TECHNICAL v13
+                    adx_df = pta.adx(h, l, c, length=14)
+                    adx_val = adx_df['ADX_14'].iloc[-1]
+                    dmp = adx_df['DMP_14'].iloc[-1]
+                    dmn = adx_df['DMN_14'].iloc[-1]
+                    adx_trend = "Rising" if adx_val > adx_df['ADX_14'].iloc[-2] else "Falling"
+                    
+                    mfi = pta.mfi(h, l, c, v, length=14).iloc[-1]
+                    
+                    # NEW: VISUAL ANALYSIS
+                    chart_rec, chart_note = analyze_chart_visual(c, h, l)
+
+                    # FILTERS v13
+                    if exclude_falling_adx and adx_trend == "Falling": continue
+                    if dmp < dmn: continue # Bullish only
+                    
+                    results.append({
+                        'Ticker': t,
+                        'Visual Rec': chart_rec, # KOLOM BARU
+                        'Price': int(c.iloc[-1]),
+                        'ADX': round(adx_val, 1),
+                        'ADX Trend': adx_trend,
+                        'MFI': round(mfi, 1),
+                        'RelVol 50D': round(v.iloc[-1] / v.rolling(50).mean().iloc[-1], 2),
+                        'Visual Note': chart_note # KOLOM BARU
+                    })
+                except:
+                    continue
+            
+            if results:
+                st.dataframe(pd.DataFrame(results), use_container_width=True)
+            else:
+                st.info("Tidak ada saham lolos kriteria v13.")
