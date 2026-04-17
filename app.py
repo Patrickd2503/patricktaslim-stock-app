@@ -6,19 +6,29 @@ from datetime import date, timedelta
 import os
 from io import BytesIO
 import pandas_ta as pta
+import requests
+import base64
+import json
+
+# ─────────────────────────────────────────────
+# SETUP (jalankan sekali sebelum app pertama kali):
+#   pip install playwright
+#   playwright install chromium
+# ─────────────────────────────────────────────
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI v13", layout="wide")
-st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v13 – Precision Edition")
+st.set_page_config(page_title="Monitor Saham BEI v15", layout="wide")
+st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v15 – AI Chart Analysis")
 
 st.markdown("""
-**Update v13:**
+**Update v15:**
 - ✅ ADX sekarang pakai **DI+ vs DI-** (arah tren benar-benar bullish)
 - ✅ **Bearish Divergence** otomatis tolak dari Shortlist
 - ✅ ADX Trend **Falling** tidak masuk shortlist
 - ✅ MFI threshold konsisten
 - ✅ Relative Volume dibandingkan **50D** juga (bukan hanya 20D)
 - ✅ Kolom **ADX Strength** & **ADX Trend** tetap ditampilkan
+- 🆕 **AI Chart Analysis** — klik tombol per saham, Claude analisa chart Yahoo Finance + OHLCV data
 """)
 
 # ─────────────────────────────────────────────
@@ -131,6 +141,23 @@ def style_adx_dir(val):
     if val == 'Bearish (DI->DI+)': return 'color: #cc0000; font-weight: bold;'
     return ''
 
+def style_chart_analysis(val):
+    """Styling untuk kolom Chart Analysis"""
+    val = str(val)
+    if 'Overextended' in val:
+        return 'background-color: #ff4b4b; color: white; font-weight: bold'
+    if 'Breakout Valid' in val:
+        return 'background-color: #1a8c1a; color: white; font-weight: bold'
+    if 'Pullback Healthy' in val:
+        return 'background-color: #2196F3; color: white; font-weight: bold'
+    if 'Uptrend Normal' in val:
+        return 'background-color: rgba(0,200,0,0.2); color: #004d00;'
+    if 'Downtrend' in val:
+        return 'background-color: #ffcccc; color: darkred; font-weight: bold'
+    if 'Sideways' in val:
+        return 'background-color: #f5f5f5; color: #555;'
+    return ''
+
 # ─────────────────────────────────────────────
 # 4. EXPORT EXCEL
 # ─────────────────────────────────────────────
@@ -174,6 +201,66 @@ def detect_bearish_divergence(close: pd.Series, mfi_series: pd.Series, window: i
     mfi_lh = m_at_c_max < m_at_prev
 
     return price_hh and mfi_lh
+
+# ─────────────────────────────────────────────
+# 5b. FUNGSI CHART ANALYSIS
+# ─────────────────────────────────────────────
+def get_chart_analysis(
+    close: pd.Series,
+    ma20: float,
+    last_rsi: float,
+    last_adx: float,
+    is_adx_bullish: bool,
+    is_breakout: str,
+    dist_20high: float,
+    mfi_change_5d: float,
+    p_change_today: float,
+    rel_vol: float,
+) -> str:
+    """
+    Mengembalikan label Chart Analysis berdasarkan kondisi teknikal:
+      - Overextended 🚨   : terlalu jauh dari MA20
+      - Breakout Valid 🚀  : breakout sehat
+      - Pullback Healthy 👍: retrace ke MA20 (entry bagus)
+      - Uptrend Normal     : tren naik biasa
+      - Downtrend ❌        : tren turun, hindari
+      - Sideways / Konsolidasi : belum jelas arahnya
+    """
+    last_price = float(close.iloc[-1])
+
+    # Hitung jarak harga ke MA20 dalam %
+    dist_to_ma20_pct = ((last_price - ma20) / ma20 * 100) if ma20 > 0 else 0.0
+
+    # --- Overextended: harga sudah >10% di atas MA20 DAN RSI tinggi ---
+    if dist_to_ma20_pct > 10 and last_rsi > 70:
+        return "Overextended 🚨"
+
+    # --- Downtrend: harga di bawah MA20, ADX kuat bearish ---
+    if last_price < ma20 and not is_adx_bullish and last_adx > 20:
+        return "Downtrend ❌"
+
+    # --- Breakout Valid: baru breakout, volume mendukung, tidak overextended ---
+    if (is_breakout == "YA"
+            and rel_vol >= 1.5
+            and is_adx_bullish
+            and dist_to_ma20_pct <= 10
+            and p_change_today > 0):
+        return "Breakout Valid 🚀"
+
+    # --- Pullback Healthy: di atas MA20 tapi retrace ke dekat MA20 (0%–5%) ---
+    if (last_price >= ma20
+            and 0 <= dist_to_ma20_pct <= 5
+            and is_adx_bullish
+            and mfi_change_5d > 0):
+        return "Pullback Healthy 👍"
+
+    # --- Uptrend Normal: di atas MA20, ADX bullish, tidak overextended ---
+    if last_price > ma20 and is_adx_bullish and dist_to_ma20_pct <= 10:
+        return "Uptrend Normal"
+
+    # --- Sideways / Konsolidasi: ADX lemah, tidak ada arah jelas ---
+    return "Sideways / Konsolidasi"
+
 
 # ─────────────────────────────────────────────
 # 6. FUNGSI ANALISA UTAMA v13
@@ -293,6 +380,20 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
         has_bearish_div = detect_bearish_divergence(c, mfi_series, window=10)
         divergence_warning = "⚠️ Bearish Divergence" if has_bearish_div else ""
 
+        # ── CHART ANALYSIS ──
+        chart_analysis = get_chart_analysis(
+            close=c,
+            ma20=ma20,
+            last_rsi=last_rsi,
+            last_adx=last_adx,
+            is_adx_bullish=is_adx_bullish,
+            is_breakout=is_breakout,
+            dist_20high=dist_20high,
+            mfi_change_5d=mfi_change_5d,
+            p_change_today=p_change_today,
+            rel_vol=rel_vol,
+        )
+
         # ── REASONS ──
         reasons = []
         if rel_vol >= 2.0 and p_change_today > 1.0:
@@ -344,16 +445,192 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot):
             'Rel Vol (50D)':      float(rel_vol_50),  # KOLOM BARU
             'Consec Up Days':     consecutive_up,
             'AvgVol20 (Lot)':     int(avg_vol20 / 100),
-            'Shortlist Reasons':  ", ".join(reasons) if reasons else ""
+            'Shortlist Reasons':  ", ".join(reasons) if reasons else "",
+            'Chart Analysis':     chart_analysis,
         })
 
     df_results = pd.DataFrame(results)
     return df_results, shortlist_keys
 
 # ─────────────────────────────────────────────
+# 6b. AI CHART ANALYSIS ENGINE (v15)
+# ─────────────────────────────────────────────
+
+CHART_LABELS = [
+    "Overextended 🚨",
+    "Breakout Valid 🚀",
+    "Pullback Healthy 👍",
+    "Uptrend Normal",
+    "Downtrend ❌",
+    "Sideways / Konsolidasi",
+]
+
+@st.cache_data(ttl=1800)
+def screenshot_yahoo_chart(ticker_jk: str) -> bytes | None:
+    """
+    Ambil screenshot chart Yahoo Finance via Playwright headless.
+    Return PNG bytes, atau None jika gagal.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        url = f"https://finance.yahoo.com/quote/{ticker_jk}/"
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            # Tutup consent popup jika ada
+            try:
+                page.click('button:has-text("Accept")', timeout=3000)
+            except Exception:
+                pass
+            try:
+                page.click('button:has-text("Reject all")', timeout=2000)
+            except Exception:
+                pass
+            # Tunggu chart container muncul
+            try:
+                page.wait_for_selector('canvas, [data-testid="chart-container"]', timeout=8000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2500)
+            # Crop area chart saja (atas: y=140, tinggi 400px)
+            png = page.screenshot(clip={"x": 0, "y": 140, "width": 1280, "height": 420})
+            browser.close()
+            return png
+    except Exception as e:
+        return None
+
+
+@st.cache_data(ttl=1800)
+def fetch_ohlcv_summary(ticker_jk: str) -> str:
+    """
+    Ambil 60 hari OHLCV terakhir dari yfinance, return ringkasan teks untuk Claude.
+    """
+    try:
+        df = yf.download(ticker_jk, period="90d", progress=False, auto_adjust=True)
+        if df.empty:
+            return "Data OHLCV tidak tersedia."
+        df = df.tail(60)
+        # Hitung MA20, MA50
+        df["MA20"] = df["Close"].rolling(20).mean()
+        df["MA50"] = df["Close"].rolling(50).mean()
+        last = df.iloc[-1]
+        prev5 = df.iloc[-6]
+        high20 = df["High"].rolling(20).max().iloc[-1]
+        low20  = df["Low"].rolling(20).min().iloc[-1]
+        avg_vol20 = df["Volume"].rolling(20).mean().iloc[-1]
+        rel_vol = float(df["Volume"].iloc[-1]) / float(avg_vol20) if avg_vol20 > 0 else 0
+
+        lines = [
+            f"Ticker: {ticker_jk}",
+            f"Tanggal terakhir: {df.index[-1].date()}",
+            f"Harga Close terakhir: {float(last['Close']):.0f}",
+            f"Open: {float(last['Open']):.0f}  High: {float(last['High']):.0f}  Low: {float(last['Low']):.0f}",
+            f"Volume hari ini: {int(last['Volume']):,}  (Rel Vol vs MA20: {rel_vol:.2f}x)",
+            f"MA20: {float(last['MA20']):.0f}  MA50: {float(last['MA50']):.0f}",
+            f"High 20D: {float(high20):.0f}  Low 20D: {float(low20):.0f}",
+            f"Perubahan harga 5D: {((float(last['Close']) - float(prev5['Close'])) / float(prev5['Close']) * 100):.2f}%",
+            "",
+            "30 candle terakhir (Date,O,H,L,C,Vol):",
+        ]
+        for idx, row in df.tail(30).iterrows():
+            lines.append(
+                f"{idx.date()}, O={float(row['Open']):.0f}, H={float(row['High']):.0f}, "
+                f"L={float(row['Low']):.0f}, C={float(row['Close']):.0f}, "
+                f"Vol={int(row['Volume']):,}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error fetch OHLCV: {e}"
+
+
+def ai_chart_analysis(ticker_code: str) -> dict:
+    """
+    Gabungkan screenshot Yahoo Finance + data OHLCV,
+    kirim ke Claude API, kembalikan dict:
+      { 'label': str, 'reasoning': str, 'has_screenshot': bool }
+    """
+    ticker_jk = ticker_code + ".JK"
+
+    # 1. Data OHLCV teks
+    ohlcv_text = fetch_ohlcv_summary(ticker_jk)
+
+    # 2. Screenshot chart Yahoo Finance
+    png_bytes = screenshot_yahoo_chart(ticker_jk)
+    has_screenshot = png_bytes is not None
+
+    # 3. Susun pesan ke Claude
+    label_list = "\n".join(f"- {lb}" for lb in CHART_LABELS)
+    system_prompt = (
+        "Kamu adalah analis teknikal saham BEI (Bursa Efek Indonesia) berpengalaman. "
+        "Tugasmu: analisa chart dan data OHLCV yang diberikan, lalu tentukan satu label kondisi chart. "
+        "Perhatikan: pola candlestick, posisi harga vs MA20/MA50, tren, volume, breakout, pullback, dan divergensi. "
+        "Jawab HANYA dalam JSON, tidak ada teks lain, format:\n"
+        '{"label": "<pilih satu label>", "reasoning": "<1-2 kalimat alasan singkat dalam Bahasa Indonesia>"}\n'
+        f"\nLabel yang tersedia:\n{label_list}"
+    )
+
+    user_content = []
+
+    if has_screenshot:
+        b64_img = base64.b64encode(png_bytes).decode("utf-8")
+        user_content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": b64_img}
+        })
+        user_content.append({
+            "type": "text",
+            "text": f"Ini adalah screenshot chart Yahoo Finance untuk saham {ticker_code}.\n\nBerikut data OHLCV 30 hari terakhir:\n\n{ohlcv_text}"
+        })
+    else:
+        user_content.append({
+            "type": "text",
+            "text": f"Screenshot chart tidak tersedia. Analisa berdasarkan data OHLCV saja.\n\n{ohlcv_text}"
+        })
+
+    payload = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 300,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_content}]
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw_text = "".join(
+            blk.get("text", "") for blk in data.get("content", []) if blk.get("type") == "text"
+        )
+        # Strip markdown fences jika ada
+        clean = raw_text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        parsed = json.loads(clean)
+        label = parsed.get("label", "Sideways / Konsolidasi")
+        # Validasi label
+        if not any(lb in label for lb in CHART_LABELS):
+            label = "Sideways / Konsolidasi"
+        return {
+            "label": label,
+            "reasoning": parsed.get("reasoning", ""),
+            "has_screenshot": has_screenshot,
+        }
+    except Exception as e:
+        return {
+            "label": "Sideways / Konsolidasi",
+            "reasoning": f"Error analisa: {e}",
+            "has_screenshot": has_screenshot,
+        }
+
+
+# ─────────────────────────────────────────────
 # 7. SIDEBAR
 # ─────────────────────────────────────────────
-st.sidebar.header("⚙️ Konfigurasi v13")
+st.sidebar.header("⚙️ Konfigurasi v15")
 
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
 selected_tickers = st.sidebar.multiselect(
@@ -413,15 +690,16 @@ FORMAT_DICT = {
 
 def apply_full_style(df_styled):
     return (df_styled
-            .map(style_mfi,        subset=['MFI (14D)'])
-            .map(style_market_rs,  subset=['Market RS'])
-            .map(style_pva,        subset=['PVA'])
-            .map(style_ma_filter,  subset=['Above MA20'])
-            .map(style_rel_vol,    subset=['Rel Vol (20D)'])
-            .map(style_adx,        subset=['ADX (14)'])
-            .map(style_divergence, subset=['Divergence Warning'])
-            .map(style_adx_trend,  subset=['ADX Trend'])
-            .map(style_adx_dir,    subset=['ADX Direction'])
+            .map(style_mfi,             subset=['MFI (14D)'])
+            .map(style_market_rs,       subset=['Market RS'])
+            .map(style_pva,             subset=['PVA'])
+            .map(style_ma_filter,       subset=['Above MA20'])
+            .map(style_rel_vol,         subset=['Rel Vol (20D)'])
+            .map(style_adx,             subset=['ADX (14)'])
+            .map(style_divergence,      subset=['Divergence Warning'])
+            .map(style_adx_trend,       subset=['ADX Trend'])
+            .map(style_adx_dir,         subset=['ADX Direction'])
+            .map(style_chart_analysis,  subset=['Chart Analysis'])
             .format(FORMAT_DICT))
 
 if btn_analisa:
@@ -459,7 +737,7 @@ if btn_analisa:
                 df_res = df_res[mask]
 
             # ── Shortlist ──
-            st.subheader("🔥 Smart Money Shortlist v13 (Siap Terbang)")
+            st.subheader("🔥 Smart Money Shortlist v14 (Siap Terbang)")
             df_s = df_res[df_res['Kode Saham'].isin(shortlist)] if not df_res.empty else pd.DataFrame()
 
             if not df_s.empty:
@@ -495,17 +773,80 @@ if btn_analisa:
             else:
                 st.info("Tidak ada data yang memenuhi filter.")
 
+            # ── AI Chart Analysis On-Demand ──
+            st.markdown("---")
+            st.subheader("🤖 AI Chart Analysis (On-Demand)")
+            st.caption(
+                "Klik tombol di bawah untuk analisa chart saham tertentu. "
+                "Claude akan melihat chart Yahoo Finance + data OHLCV 30 hari terakhir "
+                "dan memberikan label kondisi teknikal."
+            )
+
+            if not df_res.empty:
+                ticker_options = sorted(df_res['Kode Saham'].tolist())
+                col_sel, col_btn = st.columns([3, 1])
+                with col_sel:
+                    selected_for_ai = st.selectbox(
+                        "Pilih saham untuk dianalisa:", ticker_options,
+                        key="ai_chart_select"
+                    )
+                with col_btn:
+                    st.write("")  # spacer
+                    run_ai = st.button("🔍 Analisa Chart", type="primary", key="run_ai_btn")
+
+                if run_ai and selected_for_ai:
+                    with st.spinner(f"Claude sedang analisa chart {selected_for_ai}…"):
+                        result = ai_chart_analysis(selected_for_ai)
+
+                    label    = result["label"]
+                    reason   = result["reasoning"]
+                    has_ss   = result["has_screenshot"]
+
+                    # Color map untuk label
+                    label_color = {
+                        "Overextended 🚨":       "#ff4b4b",
+                        "Breakout Valid 🚀":      "#1a8c1a",
+                        "Pullback Healthy 👍":    "#2196F3",
+                        "Uptrend Normal":         "#4CAF50",
+                        "Downtrend ❌":            "#cc0000",
+                        "Sideways / Konsolidasi": "#888888",
+                    }
+                    color = next(
+                        (v for k, v in label_color.items() if k in label),
+                        "#888888"
+                    )
+
+                    st.markdown(
+                        f"### {selected_for_ai} &nbsp; "
+                        f'<span style="background:{color};color:white;'
+                        f'padding:4px 14px;border-radius:20px;font-size:1em;">'
+                        f"{label}</span>",
+                        unsafe_allow_html=True
+                    )
+                    st.markdown(f"**Analisa:** {reason}")
+
+                    src_note = "📸 Screenshot Yahoo Finance + data OHLCV" if has_ss else "📊 Data OHLCV saja (screenshot gagal)"
+                    st.caption(f"Sumber: {src_note} · "
+                               f"[Lihat chart Yahoo Finance ↗](https://finance.yahoo.com/quote/{selected_for_ai}.JK/)")
+
+                    # Tampilkan screenshot jika berhasil
+                    if has_ss:
+                        png_bytes = screenshot_yahoo_chart(selected_for_ai + ".JK")
+                        if png_bytes:
+                            with st.expander("📷 Screenshot Chart Yahoo Finance"):
+                                st.image(png_bytes, use_container_width=True)
+
             # ── Download ──
             excel_data = to_excel_report(df_s if not df_s.empty else pd.DataFrame(), df_res)
             st.sidebar.download_button(
-                label="📥 Download Report Excel v13",
+                label="📥 Download Report Excel v15",
                 data=excel_data,
-                file_name=f"Analisa_BEI_{date.today()}_v13.xlsx",
+                file_name=f"Analisa_BEI_{date.today()}_v15.xlsx",
                 mime="application/vnd.ms-excel"
             )
 
             # ── Legenda ──
-            with st.expander("📖 Legenda Indikator v13"):
+            with st.expander("📖 Legenda Indikator v15"):
                 st.markdown("""
 | Kolom | Penjelasan |
 |---|---|
@@ -513,17 +854,18 @@ if btn_analisa:
 | **MFI Change 5D** | Perubahan MFI dalam 5 hari terakhir. Positif = uang masuk |
 | **RSI (14)** | Relative Strength Index. Ideal entry: 40–70 |
 | **ADX (14)** | Kekuatan tren. > 25 = tren kuat (biru) |
-| **ADX Direction** 🆕 | **DI+ > DI-** = tren naik. **DI- > DI+** = tren turun. Shortlist hanya terima Bullish |
+| **ADX Direction** | **DI+ > DI-** = tren naik. **DI- > DI+** = tren turun. Shortlist hanya terima Bullish |
 | **ADX Trend** | Apakah kekuatan ADX sedang Rising/Falling/Flat |
 | **ADX Strength** | Weak / Moderate / Strong / Very Strong |
-| **Divergence Warning** 🆕 | Harga buat higher high tapi MFI lower high = potensi reversal |
+| **Divergence Warning** | Harga buat higher high tapi MFI lower high = potensi reversal |
 | **PVA** | Price Volume Analysis: konfirmasi volume terhadap arah harga |
 | **Market RS** | Kinerja saham vs IHSG 20 hari terakhir |
 | **Rel Vol (20D)** | Volume hari ini vs rata-rata 20 hari |
-| **Rel Vol (50D)** 🆕 | Volume hari ini vs rata-rata 50 hari — baseline lebih stabil |
-| **Consec Up Days** | Berapa hari berturut-turut harga naik |
-| **20D Breakout** | Apakah harga tembus high 20 hari terakhir (±1%) |
+| **Rel Vol (50D)** | Volume hari ini vs rata-rata 50 hari — baseline lebih stabil |
+| **Chart Analysis** 🆕 | `Overextended 🚨` terlalu jauh MA20 · `Breakout Valid 🚀` baru breakout sehat · `Pullback Healthy 👍` retrace ke MA20, entry bagus · `Uptrend Normal` tren naik biasa · `Downtrend ❌` hindari · `Sideways / Konsolidasi` belum jelas |
+| **AI Chart Analysis** 🆕 | Analisa oleh Claude berdasarkan screenshot chart Yahoo Finance + data OHLCV. Klik tombol "Analisa Chart" per saham. |
 """)
+
 
         else:
             st.error("Data gagal diambil untuk range tanggal tersebut. Coba perlebar range tanggal.")
@@ -531,10 +873,11 @@ if btn_analisa:
 else:
     st.info(
         f"📂 Database: **{loaded_file}**\n\n"
-        "**Perubahan utama v13:**\n"
+        "**Perubahan utama v15:**\n"
         "- 🆕 ADX sekarang cek DI+ vs DI- — tidak ada lagi sinyal palsu tren turun\n"
         "- 🆕 Bearish Divergence otomatis ditolak dari Shortlist\n"
         "- 🆕 ADX Falling tidak masuk Shortlist\n"
         "- 🆕 Rel Vol 50D sebagai baseline tambahan\n"
-        "- 🆕 MFI threshold konsisten (55–85) untuk Shortlist"
+        "- 🆕 MFI threshold konsisten (55–85) untuk Shortlist\n"
+        "- 🆕 **AI Chart Analysis**: klik tombol per saham → Claude analisa chart Yahoo Finance + OHLCV"
     )
