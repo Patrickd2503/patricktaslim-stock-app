@@ -1022,10 +1022,25 @@ if btn_analisa:
                 "Claude akan melihat chart Yahoo Finance + data OHLCV 30 hari terakhir."
             )
 
+            # Inisialisasi session_state untuk menyimpan hasil agar tidak hilang saat rerun
+            if "ai_results" not in st.session_state:
+                st.session_state.ai_results = {}   # dict: ticker -> result dict
+            if "ai_screenshot" not in st.session_state:
+                st.session_state.ai_screenshot = {}  # dict: ticker -> png bytes
+
+            LABEL_COLOR = {
+                "Overextended 🚨":       "#ff4b4b",
+                "Breakout Valid 🚀":      "#1a8c1a",
+                "Pullback Healthy 👍":    "#2196F3",
+                "Uptrend Normal":         "#4CAF50",
+                "Downtrend ❌":            "#cc0000",
+                "Sideways / Konsolidasi": "#888888",
+            }
+
             if not df_res.empty:
                 # Prioritaskan shortlist + prebreakout di dropdown
-                priority = shortlist + [k for k in prebreakout_list if k not in shortlist]
-                rest     = [k for k in sorted(df_res['Kode Saham'].tolist()) if k not in priority]
+                priority       = shortlist + [k for k in prebreakout_list if k not in shortlist]
+                rest           = [k for k in sorted(df_res['Kode Saham'].tolist()) if k not in priority]
                 ticker_options = priority + rest
 
                 col_sel, col_btn = st.columns([3, 1])
@@ -1038,26 +1053,21 @@ if btn_analisa:
                     st.write("")
                     run_ai = st.button("🔍 Analisa Chart", type="primary", key="run_ai_btn")
 
+                # Tombol diklik → jalankan analisa, simpan ke session_state
                 if run_ai and selected_for_ai:
                     with st.spinner(f"Claude sedang analisa chart {selected_for_ai}…"):
-                        result = ai_chart_analysis(selected_for_ai)
+                        result   = ai_chart_analysis(selected_for_ai)
+                        png_bytes = screenshot_yahoo_chart(selected_for_ai + ".JK")
+                    st.session_state.ai_results[selected_for_ai]    = result
+                    st.session_state.ai_screenshot[selected_for_ai] = png_bytes
 
-                    label    = result["label"]
-                    reason   = result["reasoning"]
-                    has_ss   = result["has_screenshot"]
-
-                    label_color = {
-                        "Overextended 🚨":       "#ff4b4b",
-                        "Breakout Valid 🚀":      "#1a8c1a",
-                        "Pullback Healthy 👍":    "#2196F3",
-                        "Uptrend Normal":         "#4CAF50",
-                        "Downtrend ❌":            "#cc0000",
-                        "Sideways / Konsolidasi": "#888888",
-                    }
-                    color = next(
-                        (v for k, v in label_color.items() if k in label),
-                        "#888888"
-                    )
+                # Render hasil dari session_state (tetap tampil meski page rerun)
+                if selected_for_ai in st.session_state.ai_results:
+                    result = st.session_state.ai_results[selected_for_ai]
+                    label  = result["label"]
+                    reason = result["reasoning"]
+                    has_ss = result["has_screenshot"]
+                    color  = next((v for k, v in LABEL_COLOR.items() if k in label), "#888888")
 
                     st.markdown(
                         f"### {selected_for_ai} &nbsp; "
@@ -1069,14 +1079,29 @@ if btn_analisa:
                     st.markdown(f"**Analisa:** {reason}")
 
                     src_note = "📸 Screenshot Yahoo Finance + data OHLCV" if has_ss else "📊 Data OHLCV saja (screenshot gagal)"
-                    st.caption(f"Sumber: {src_note} · "
-                               f"[Lihat chart Yahoo Finance ↗](https://finance.yahoo.com/quote/{selected_for_ai}.JK/)")
+                    st.caption(
+                        f"Sumber: {src_note} · "
+                        f"[Lihat chart Yahoo Finance ↗](https://finance.yahoo.com/quote/{selected_for_ai}.JK/)"
+                    )
 
-                    if has_ss:
-                        png_bytes = screenshot_yahoo_chart(selected_for_ai + ".JK")
-                        if png_bytes:
-                            with st.expander("📷 Screenshot Chart Yahoo Finance"):
-                                st.image(png_bytes, use_container_width=True)
+                    png_bytes = st.session_state.ai_screenshot.get(selected_for_ai)
+                    if png_bytes:
+                        with st.expander("📷 Screenshot Chart Yahoo Finance"):
+                            st.image(png_bytes, use_container_width=True)
+
+                # Riwayat analisa sesi ini
+                done = [k for k in ticker_options if k in st.session_state.ai_results]
+                if len(done) > 1:
+                    with st.expander(f"📋 Riwayat analisa sesi ini ({len(done)} saham)"):
+                        for tk in done:
+                            r  = st.session_state.ai_results[tk]
+                            c2 = next((v for k, v in LABEL_COLOR.items() if k in r["label"]), "#888888")
+                            st.markdown(
+                                f'**{tk}** — <span style="background:{c2};color:white;'
+                                f'padding:2px 10px;border-radius:12px;font-size:0.85em;">'
+                                f'{r["label"]}</span> &nbsp; {r["reasoning"]}',
+                                unsafe_allow_html=True
+                            )
 
             # ── Download ──
             df_s_dl    = df_res[df_res['Kode Saham'].isin(shortlist)] if not df_res.empty else pd.DataFrame()
