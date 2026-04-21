@@ -860,6 +860,13 @@ def apply_full_style(df_styled, include_score=True, include_watch=False):
 # ─────────────────────────────────────────────
 # 9. OUTPUT UTAMA
 # ─────────────────────────────────────────────
+# ── Inisialisasi session_state global ──
+if "tv_ticker" not in st.session_state:
+    st.session_state.tv_ticker = None
+if "analisa_hasil" not in st.session_state:
+    st.session_state.analisa_hasil = None   # akan diisi dict saat tombol diklik
+
+# ── Jalankan analisa hanya saat tombol diklik ──
 if btn_analisa:
     with st.spinner('Menganalisa market…'):
         active_list = selected_tickers if selected_tickers else target_list
@@ -898,82 +905,100 @@ if btn_analisa:
             else:
                 df_res_filtered = df_res.copy()
 
-            # Kolom yang ditampilkan (kondisional Early Momentum Score)
-            base_cols = [
-                'Kode Saham', 'Free Float (%)', 'MFI (14D)', 'MFI Change 5D',
-                'RSI (14)', 'ADX (14)', 'ADX Direction', 'ADX Trend', 'ADX Strength',
-                'Divergence Warning', 'PVA', 'Market RS', 'Above MA20', '20D Breakout',
-                'Dist to 20D High (%)', 'Last Price', 'Rel Vol (20D)', 'Rel Vol (50D)',
-                'Consec Up Days', 'AvgVol20 (Lot)',
-            ]
-            score_col  = ['Early Momentum Score'] if show_score_in_table else []
-            watch_col  = ['Pre-Breakout Watch']
-            reason_col = ['Shortlist Reasons', 'Chart Analysis']
+            # ── Simpan semua hasil ke session_state ──
+            st.session_state.analisa_hasil = {
+                "df_res":          df_res,
+                "shortlist":       shortlist,
+                "prebreakout_list": prebreakout_list,
+                "df_res_filtered": df_res_filtered,
+            }
+            st.session_state.tv_ticker = None  # reset pilihan chart saat analisa baru
 
-            all_display_cols = base_cols + score_col + watch_col + reason_col
+        else:
+            st.error("Data gagal diambil untuk range tanggal tersebut. Coba perlebar range tanggal.")
 
-            # Inisialisasi session_state TradingView
-            if "tv_ticker" not in st.session_state:
-                st.session_state.tv_ticker = None
+# ── Render hasil: dari session_state (tetap tampil saat rerun apapun) ──
+if st.session_state.analisa_hasil is not None:
+    _h               = st.session_state.analisa_hasil
+    df_res           = _h["df_res"]
+    shortlist        = _h["shortlist"]
+    prebreakout_list = _h["prebreakout_list"]
+    df_res_filtered  = _h["df_res_filtered"]
 
-            # ── TAB LAYOUT ──
-            tab1, tab2, tab3 = st.tabs([
-                "🔥 Shortlist Utama",
-                "🔭 Pre-Breakout Watch (Opsi A)",
-                "🔍 Semua Hasil Analisa",
-            ])
+    if not df_res.empty:
 
-            # ═══════════════════════════════════════
-            # TAB 1: SHORTLIST UTAMA
-            # ═══════════════════════════════════════
-            with tab1:
-                st.subheader("🔥 Smart Money Shortlist v16 (Siap Terbang)")
-                df_s = (df_res_filtered[df_res_filtered['Kode Saham'].isin(shortlist)]
-                        if not df_res_filtered.empty else pd.DataFrame())
+        # Kolom yang ditampilkan (kondisional Early Momentum Score)
+        base_cols = [
+            'Kode Saham', 'Free Float (%)', 'MFI (14D)', 'MFI Change 5D',
+            'RSI (14)', 'ADX (14)', 'ADX Direction', 'ADX Trend', 'ADX Strength',
+            'Divergence Warning', 'PVA', 'Market RS', 'Above MA20', '20D Breakout',
+            'Dist to 20D High (%)', 'Last Price', 'Rel Vol (20D)', 'Rel Vol (50D)',
+            'Consec Up Days', 'AvgVol20 (Lot)',
+        ]
+        score_col  = ['Early Momentum Score'] if show_score_in_table else []
+        watch_col  = ['Pre-Breakout Watch']
+        reason_col = ['Shortlist Reasons', 'Chart Analysis']
 
-                if not df_s.empty:
-                    cols_s = [c for c in base_cols + score_col + reason_col if c in df_s.columns]
-                    st.dataframe(
-                        apply_full_style(df_s[cols_s].style, include_score=show_score_in_table),
-                        use_container_width=True
+        all_display_cols = base_cols + score_col + watch_col + reason_col
+
+        # ── TAB LAYOUT ──
+        tab1, tab2, tab3 = st.tabs([
+            "🔥 Shortlist Utama",
+            "🔭 Pre-Breakout Watch (Opsi A)",
+            "🔍 Semua Hasil Analisa",
+        ])
+
+        # ═══════════════════════════════════════
+        # TAB 1: SHORTLIST UTAMA
+        # ═══════════════════════════════════════
+        with tab1:
+            st.subheader("🔥 Smart Money Shortlist v16 (Siap Terbang)")
+            df_s = (df_res_filtered[df_res_filtered['Kode Saham'].isin(shortlist)]
+                    if not df_res_filtered.empty else pd.DataFrame())
+
+            if not df_s.empty:
+                cols_s = [c for c in base_cols + score_col + reason_col if c in df_s.columns]
+                st.dataframe(
+                    apply_full_style(df_s[cols_s].style, include_score=show_score_in_table),
+                    use_container_width=True
+                )
+
+                # ── TradingView Widget ──
+                st.markdown("#### 📈 TradingView Chart")
+                st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
+                ticker_list_s = df_s['Kode Saham'].tolist()
+                # Jaga nilai default jika tv_ticker sudah ada di list ini
+                default_idx_s = ticker_list_s.index(st.session_state.tv_ticker) \
+                    if st.session_state.tv_ticker in ticker_list_s else 0
+                selected_tv_s = st.selectbox(
+                    "🔍 Pilih saham untuk chart:", ticker_list_s,
+                    index=default_idx_s, key="tv_select_tab1"
+                )
+                if selected_tv_s:
+                    st.session_state.tv_ticker = selected_tv_s
+                    show_tradingview_widget(selected_tv_s)
+
+                st.markdown("#### 📋 Ringkasan Kandidat Shortlist")
+                for _, row in df_s.iterrows():
+                    di_icon = "🟢" if row['ADX Direction'] == 'Bullish (DI+>DI-)' else "🔴"
+                    score_str = f" | Score: **{int(row['Early Momentum Score'])}**/10" if show_score_in_table else ""
+                    st.markdown(
+                        f"**{row['Kode Saham']}** | Harga: Rp {row['Last Price']:,} | "
+                        f"RSI: {row['RSI (14)']:.1f} | ADX: {row['ADX (14)']:.1f} "
+                        f"{di_icon} {row['ADX Direction']} | "
+                        f"MFI: {row['MFI (14D)']:.1f} ({row['MFI Change 5D']:+.1f}) | "
+                        f"RelVol20: {row['Rel Vol (20D)']:.2f}x{score_str} | "
+                        f"*{row['Shortlist Reasons']}*"
                     )
+            else:
+                st.info("Belum ada kandidat yang memenuhi kriteria super ketat hari ini.")
 
-                    # ── TradingView Widget ──
-                    st.markdown("#### 📈 TradingView Chart")
-                    st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
-                    ticker_list_s = df_s['Kode Saham'].tolist()
-                    # Jaga nilai default jika tv_ticker sudah ada di list ini
-                    default_idx_s = ticker_list_s.index(st.session_state.tv_ticker) \
-                        if st.session_state.tv_ticker in ticker_list_s else 0
-                    selected_tv_s = st.selectbox(
-                        "🔍 Pilih saham untuk chart:", ticker_list_s,
-                        index=default_idx_s, key="tv_select_tab1"
-                    )
-                    if selected_tv_s:
-                        st.session_state.tv_ticker = selected_tv_s
-                        show_tradingview_widget(selected_tv_s)
-
-                    st.markdown("#### 📋 Ringkasan Kandidat Shortlist")
-                    for _, row in df_s.iterrows():
-                        di_icon = "🟢" if row['ADX Direction'] == 'Bullish (DI+>DI-)' else "🔴"
-                        score_str = f" | Score: **{int(row['Early Momentum Score'])}**/10" if show_score_in_table else ""
-                        st.markdown(
-                            f"**{row['Kode Saham']}** | Harga: Rp {row['Last Price']:,} | "
-                            f"RSI: {row['RSI (14)']:.1f} | ADX: {row['ADX (14)']:.1f} "
-                            f"{di_icon} {row['ADX Direction']} | "
-                            f"MFI: {row['MFI (14D)']:.1f} ({row['MFI Change 5D']:+.1f}) | "
-                            f"RelVol20: {row['Rel Vol (20D)']:.2f}x{score_str} | "
-                            f"*{row['Shortlist Reasons']}*"
-                        )
-                else:
-                    st.info("Belum ada kandidat yang memenuhi kriteria super ketat hari ini.")
-
-            # ═══════════════════════════════════════
-            # TAB 2: PRE-BREAKOUT WATCH LIST (OPSI A)
-            # ═══════════════════════════════════════
-            with tab2:
-                st.subheader("🔭 Pre-Breakout Watch List (Opsi A)")
-                st.markdown("""
+        # ═══════════════════════════════════════
+        # TAB 2: PRE-BREAKOUT WATCH LIST (OPSI A)
+        # ═══════════════════════════════════════
+        with tab2:
+            st.subheader("🔭 Pre-Breakout Watch List (Opsi A)")
+            st.markdown("""
 > **Filosofi:** Saham ini **BELUM** masuk shortlist utama karena belum breakout / belum consec up / 
 > volume belum meledak. Tapi **uang sudah masuk diam-diam** (MFI Change tinggi) dan momentum 
 > mulai tumbuh (ADX Rising). *Pantau 1–3 hari ke depan.*
@@ -981,67 +1006,67 @@ if btn_analisa:
 > ⚠️ **Risiko lebih tinggi** dari shortlist utama. Sizing lebih kecil, gunakan stop loss ketat.
 """)
 
-                if not enable_prebreakout:
-                    st.warning("Pre-Breakout Watch List dinonaktifkan. Aktifkan di sidebar.")
+            if not enable_prebreakout:
+                st.warning("Pre-Breakout Watch List dinonaktifkan. Aktifkan di sidebar.")
+            else:
+                # Ambil dari df_res (belum difilter ketat) agar kandidat pre-breakout tidak tersaring
+                df_watch_raw = df_res[df_res['Kode Saham'].isin(prebreakout_list)].copy()
+
+                # Terapkan filter harga & volume saja (filter ketat seperti shortlist tidak berlaku)
+                if not df_watch_raw.empty:
+                    watch_mask = (
+                        (df_watch_raw['Last Price'] >= min_p) &
+                        (df_watch_raw['Last Price'] <= max_p) &
+                        (df_watch_raw['Free Float (%)'] <= max_ff)
+                    )
+                    df_watch = df_watch_raw[watch_mask].copy()
+                    # Sort by Early Momentum Score descending
+                    df_watch = df_watch.sort_values('Early Momentum Score', ascending=False)
                 else:
-                    # Ambil dari df_res (belum difilter ketat) agar kandidat pre-breakout tidak tersaring
-                    df_watch_raw = df_res[df_res['Kode Saham'].isin(prebreakout_list)].copy()
+                    df_watch = pd.DataFrame()
 
-                    # Terapkan filter harga & volume saja (filter ketat seperti shortlist tidak berlaku)
-                    if not df_watch_raw.empty:
-                        watch_mask = (
-                            (df_watch_raw['Last Price'] >= min_p) &
-                            (df_watch_raw['Last Price'] <= max_p) &
-                            (df_watch_raw['Free Float (%)'] <= max_ff)
+                if not df_watch.empty:
+                    cols_w = [c for c in base_cols + score_col + reason_col if c in df_watch.columns]
+                    st.dataframe(
+                        apply_full_style(
+                            df_watch[cols_w].style,
+                            include_score=show_score_in_table
+                        ),
+                        use_container_width=True
+                    )
+
+                    # ── TradingView Widget ──
+                    st.markdown("#### 📈 TradingView Chart")
+                    st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
+                    ticker_list_w = df_watch['Kode Saham'].tolist()
+                    default_idx_w = ticker_list_w.index(st.session_state.tv_ticker) \
+                        if st.session_state.tv_ticker in ticker_list_w else 0
+                    selected_tv_w = st.selectbox(
+                        "🔍 Pilih saham untuk chart:", ticker_list_w,
+                        index=default_idx_w, key="tv_select_tab2"
+                    )
+                    if selected_tv_w:
+                        st.session_state.tv_ticker = selected_tv_w
+                        show_tradingview_widget(selected_tv_w)
+
+                    st.markdown("#### 📋 Ringkasan Pre-Breakout Candidates")
+                    for _, row in df_watch.iterrows():
+                        sc = int(row['Early Momentum Score'])
+                        score_badge = "🟠" if sc >= 6 else "🟡"
+                        ff_note = " ⚡Float kecil!" if row['Free Float (%)'] < 15 else ""
+                        st.markdown(
+                            f"{score_badge} **{row['Kode Saham']}** | "
+                            f"Harga: Rp {row['Last Price']:,} | "
+                            f"MFI Change: **{row['MFI Change 5D']:+.1f}** | "
+                            f"ADX Trend: {row['ADX Trend']} | "
+                            f"Consec Up: {row['Consec Up Days']} hari | "
+                            f"Rel Vol: {row['Rel Vol (20D)']:.2f}x | "
+                            f"Score: **{sc}**/10{ff_note}"
                         )
-                        df_watch = df_watch_raw[watch_mask].copy()
-                        # Sort by Early Momentum Score descending
-                        df_watch = df_watch.sort_values('Early Momentum Score', ascending=False)
-                    else:
-                        df_watch = pd.DataFrame()
 
-                    if not df_watch.empty:
-                        cols_w = [c for c in base_cols + score_col + reason_col if c in df_watch.columns]
-                        st.dataframe(
-                            apply_full_style(
-                                df_watch[cols_w].style,
-                                include_score=show_score_in_table
-                            ),
-                            use_container_width=True
-                        )
-
-                        # ── TradingView Widget ──
-                        st.markdown("#### 📈 TradingView Chart")
-                        st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
-                        ticker_list_w = df_watch['Kode Saham'].tolist()
-                        default_idx_w = ticker_list_w.index(st.session_state.tv_ticker) \
-                            if st.session_state.tv_ticker in ticker_list_w else 0
-                        selected_tv_w = st.selectbox(
-                            "🔍 Pilih saham untuk chart:", ticker_list_w,
-                            index=default_idx_w, key="tv_select_tab2"
-                        )
-                        if selected_tv_w:
-                            st.session_state.tv_ticker = selected_tv_w
-                            show_tradingview_widget(selected_tv_w)
-
-                        st.markdown("#### 📋 Ringkasan Pre-Breakout Candidates")
-                        for _, row in df_watch.iterrows():
-                            sc = int(row['Early Momentum Score'])
-                            score_badge = "🟠" if sc >= 6 else "🟡"
-                            ff_note = " ⚡Float kecil!" if row['Free Float (%)'] < 15 else ""
-                            st.markdown(
-                                f"{score_badge} **{row['Kode Saham']}** | "
-                                f"Harga: Rp {row['Last Price']:,} | "
-                                f"MFI Change: **{row['MFI Change 5D']:+.1f}** | "
-                                f"ADX Trend: {row['ADX Trend']} | "
-                                f"Consec Up: {row['Consec Up Days']} hari | "
-                                f"Rel Vol: {row['Rel Vol (20D)']:.2f}x | "
-                                f"Score: **{sc}**/10{ff_note}"
-                            )
-
-                        # ── Penjelasan Early Momentum Score breakdown ──
-                        with st.expander("📊 Cara Baca Early Momentum Score"):
-                            st.markdown("""
+                    # ── Penjelasan Early Momentum Score breakdown ──
+                    with st.expander("📊 Cara Baca Early Momentum Score"):
+                        st.markdown("""
 | Skor | Komponen | Bobot |
 |------|----------|-------|
 | +3 | MFI Change 5D ≥ 30 (uang deras masuk) | Tertinggi |
@@ -1060,156 +1085,156 @@ if btn_analisa:
 - **4–5**: Ada sinyal, tapi masih perlu sabar
 - **0–3**: Belum menarik, skip dulu
 """)
-                    else:
-                        st.info("Tidak ada kandidat Pre-Breakout Watch hari ini dengan parameter saat ini. "
-                                "Coba turunkan 'Min MFI Change 5D untuk Watch' atau 'Min Early Momentum Score' di sidebar.")
-
-            # ═══════════════════════════════════════
-            # TAB 3: SEMUA HASIL ANALISA
-            # ═══════════════════════════════════════
-            with tab3:
-                st.subheader("🔍 Seluruh Hasil Analisa")
-
-                # Sort option
-                sort_col = st.selectbox(
-                    "Urutkan berdasarkan:",
-                    options=['Early Momentum Score', 'MFI Change 5D', 'MFI (14D)', 'Rel Vol (20D)', 'ADX (14)'],
-                    index=0
-                )
-                df_sorted = (df_res_filtered.sort_values(sort_col, ascending=False)
-                             if not df_res_filtered.empty else df_res_filtered)
-
-                if not df_sorted.empty:
-                    cols_all = [c for c in all_display_cols if c in df_sorted.columns]
-                    st.dataframe(
-                        apply_full_style(
-                            df_sorted[cols_all].style,
-                            include_score=show_score_in_table,
-                            include_watch=True
-                        ),
-                        use_container_width=True,
-                        height=500
-                    )
-
-                    # ── TradingView Widget ──
-                    st.markdown("#### 📈 TradingView Chart")
-                    st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
-                    ticker_list_all = df_sorted['Kode Saham'].tolist()
-                    default_idx_all = ticker_list_all.index(st.session_state.tv_ticker) \
-                        if st.session_state.tv_ticker in ticker_list_all else 0
-                    selected_tv_all = st.selectbox(
-                        "🔍 Pilih saham untuk chart:", ticker_list_all,
-                        index=default_idx_all, key="tv_select_tab3"
-                    )
-                    if selected_tv_all:
-                        st.session_state.tv_ticker = selected_tv_all
-                        show_tradingview_widget(selected_tv_all)
                 else:
-                    st.info("Tidak ada data yang memenuhi filter.")
+                    st.info("Tidak ada kandidat Pre-Breakout Watch hari ini dengan parameter saat ini. "
+                            "Coba turunkan 'Min MFI Change 5D untuk Watch' atau 'Min Early Momentum Score' di sidebar.")
 
-            # ── AI Chart Analysis ──
-            st.markdown("---")
-            st.subheader("🤖 AI Chart Analysis (On-Demand)")
-            st.caption(
-                "Klik tombol di bawah untuk analisa chart saham tertentu. "
-                "Claude akan melihat chart Yahoo Finance + data OHLCV 30 hari terakhir."
+        # ═══════════════════════════════════════
+        # TAB 3: SEMUA HASIL ANALISA
+        # ═══════════════════════════════════════
+        with tab3:
+            st.subheader("🔍 Seluruh Hasil Analisa")
+
+            # Sort option
+            sort_col = st.selectbox(
+                "Urutkan berdasarkan:",
+                options=['Early Momentum Score', 'MFI Change 5D', 'MFI (14D)', 'Rel Vol (20D)', 'ADX (14)'],
+                index=0
             )
+            df_sorted = (df_res_filtered.sort_values(sort_col, ascending=False)
+                         if not df_res_filtered.empty else df_res_filtered)
 
-            # Inisialisasi session_state untuk menyimpan hasil agar tidak hilang saat rerun
-            if "ai_results" not in st.session_state:
-                st.session_state.ai_results = {}   # dict: ticker -> result dict
-            if "ai_screenshot" not in st.session_state:
-                st.session_state.ai_screenshot = {}  # dict: ticker -> png bytes
+            if not df_sorted.empty:
+                cols_all = [c for c in all_display_cols if c in df_sorted.columns]
+                st.dataframe(
+                    apply_full_style(
+                        df_sorted[cols_all].style,
+                        include_score=show_score_in_table,
+                        include_watch=True
+                    ),
+                    use_container_width=True,
+                    height=500
+                )
 
-            LABEL_COLOR = {
-                "Overextended 🚨":       "#ff4b4b",
-                "Breakout Valid 🚀":      "#1a8c1a",
-                "Pullback Healthy 👍":    "#2196F3",
-                "Uptrend Normal":         "#4CAF50",
-                "Downtrend ❌":            "#cc0000",
-                "Sideways / Konsolidasi": "#888888",
-            }
+                # ── TradingView Widget ──
+                st.markdown("#### 📈 TradingView Chart")
+                st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
+                ticker_list_all = df_sorted['Kode Saham'].tolist()
+                default_idx_all = ticker_list_all.index(st.session_state.tv_ticker) \
+                    if st.session_state.tv_ticker in ticker_list_all else 0
+                selected_tv_all = st.selectbox(
+                    "🔍 Pilih saham untuk chart:", ticker_list_all,
+                    index=default_idx_all, key="tv_select_tab3"
+                )
+                if selected_tv_all:
+                    st.session_state.tv_ticker = selected_tv_all
+                    show_tradingview_widget(selected_tv_all)
+            else:
+                st.info("Tidak ada data yang memenuhi filter.")
 
-            if not df_res.empty:
-                # Prioritaskan shortlist + prebreakout di dropdown
-                priority       = shortlist + [k for k in prebreakout_list if k not in shortlist]
-                rest           = [k for k in sorted(df_res['Kode Saham'].tolist()) if k not in priority]
-                ticker_options = priority + rest
+        # ── AI Chart Analysis ──
+        st.markdown("---")
+        st.subheader("🤖 AI Chart Analysis (On-Demand)")
+        st.caption(
+            "Klik tombol di bawah untuk analisa chart saham tertentu. "
+            "Claude akan melihat chart Yahoo Finance + data OHLCV 30 hari terakhir."
+        )
 
-                col_sel, col_btn = st.columns([3, 1])
-                with col_sel:
-                    selected_for_ai = st.selectbox(
-                        "Pilih saham untuk dianalisa:", ticker_options,
-                        key="ai_chart_select"
-                    )
-                with col_btn:
-                    st.write("")
-                    run_ai = st.button("🔍 Analisa Chart", type="primary", key="run_ai_btn")
+        # Inisialisasi session_state untuk menyimpan hasil agar tidak hilang saat rerun
+        if "ai_results" not in st.session_state:
+            st.session_state.ai_results = {}   # dict: ticker -> result dict
+        if "ai_screenshot" not in st.session_state:
+            st.session_state.ai_screenshot = {}  # dict: ticker -> png bytes
 
-                # Tombol diklik → jalankan analisa, simpan ke session_state
-                if run_ai and selected_for_ai:
-                    with st.spinner(f"Claude sedang analisa chart {selected_for_ai}…"):
-                        result   = ai_chart_analysis(selected_for_ai)
-                        png_bytes = screenshot_yahoo_chart(selected_for_ai + ".JK")
-                    st.session_state.ai_results[selected_for_ai]    = result
-                    st.session_state.ai_screenshot[selected_for_ai] = png_bytes
+        LABEL_COLOR = {
+            "Overextended 🚨":       "#ff4b4b",
+            "Breakout Valid 🚀":      "#1a8c1a",
+            "Pullback Healthy 👍":    "#2196F3",
+            "Uptrend Normal":         "#4CAF50",
+            "Downtrend ❌":            "#cc0000",
+            "Sideways / Konsolidasi": "#888888",
+        }
 
-                # Render hasil dari session_state (tetap tampil meski page rerun)
-                if selected_for_ai in st.session_state.ai_results:
-                    result = st.session_state.ai_results[selected_for_ai]
-                    label  = result["label"]
-                    reason = result["reasoning"]
-                    has_ss = result["has_screenshot"]
-                    color  = next((v for k, v in LABEL_COLOR.items() if k in label), "#888888")
+        if not df_res.empty:
+            # Prioritaskan shortlist + prebreakout di dropdown
+            priority       = shortlist + [k for k in prebreakout_list if k not in shortlist]
+            rest           = [k for k in sorted(df_res['Kode Saham'].tolist()) if k not in priority]
+            ticker_options = priority + rest
 
-                    st.markdown(
-                        f"### {selected_for_ai} &nbsp; "
-                        f'<span style="background:{color};color:white;'
-                        f'padding:4px 14px;border-radius:20px;font-size:1em;">'
-                        f"{label}</span>",
-                        unsafe_allow_html=True
-                    )
-                    st.markdown(f"**Analisa:** {reason}")
+            col_sel, col_btn = st.columns([3, 1])
+            with col_sel:
+                selected_for_ai = st.selectbox(
+                    "Pilih saham untuk dianalisa:", ticker_options,
+                    key="ai_chart_select"
+                )
+            with col_btn:
+                st.write("")
+                run_ai = st.button("🔍 Analisa Chart", type="primary", key="run_ai_btn")
 
-                    src_note = "📸 Screenshot Yahoo Finance + data OHLCV" if has_ss else "📊 Data OHLCV saja (screenshot gagal)"
-                    st.caption(
-                        f"Sumber: {src_note} · "
-                        f"[Lihat chart Yahoo Finance ↗](https://finance.yahoo.com/quote/{selected_for_ai}.JK/)"
-                    )
+            # Tombol diklik → jalankan analisa, simpan ke session_state
+            if run_ai and selected_for_ai:
+                with st.spinner(f"Claude sedang analisa chart {selected_for_ai}…"):
+                    result   = ai_chart_analysis(selected_for_ai)
+                    png_bytes = screenshot_yahoo_chart(selected_for_ai + ".JK")
+                st.session_state.ai_results[selected_for_ai]    = result
+                st.session_state.ai_screenshot[selected_for_ai] = png_bytes
 
-                    png_bytes = st.session_state.ai_screenshot.get(selected_for_ai)
-                    if png_bytes:
-                        with st.expander("📷 Screenshot Chart Yahoo Finance"):
-                            st.image(png_bytes, use_container_width=True)
+            # Render hasil dari session_state (tetap tampil meski page rerun)
+            if selected_for_ai in st.session_state.ai_results:
+                result = st.session_state.ai_results[selected_for_ai]
+                label  = result["label"]
+                reason = result["reasoning"]
+                has_ss = result["has_screenshot"]
+                color  = next((v for k, v in LABEL_COLOR.items() if k in label), "#888888")
 
-                # Riwayat analisa sesi ini
-                done = [k for k in ticker_options if k in st.session_state.ai_results]
-                if len(done) > 1:
-                    with st.expander(f"📋 Riwayat analisa sesi ini ({len(done)} saham)"):
-                        for tk in done:
-                            r  = st.session_state.ai_results[tk]
-                            c2 = next((v for k, v in LABEL_COLOR.items() if k in r["label"]), "#888888")
-                            st.markdown(
-                                f'**{tk}** — <span style="background:{c2};color:white;'
-                                f'padding:2px 10px;border-radius:12px;font-size:0.85em;">'
-                                f'{r["label"]}</span> &nbsp; {r["reasoning"]}',
-                                unsafe_allow_html=True
-                            )
+                st.markdown(
+                    f"### {selected_for_ai} &nbsp; "
+                    f'<span style="background:{color};color:white;'
+                    f'padding:4px 14px;border-radius:20px;font-size:1em;">'
+                    f"{label}</span>",
+                    unsafe_allow_html=True
+                )
+                st.markdown(f"**Analisa:** {reason}")
 
-            # ── Download ──
-            df_s_dl    = df_res[df_res['Kode Saham'].isin(shortlist)] if not df_res.empty else pd.DataFrame()
-            df_w_dl    = df_res[df_res['Kode Saham'].isin(prebreakout_list)] if not df_res.empty else pd.DataFrame()
-            excel_data = to_excel_report(df_s_dl, df_w_dl, df_res_filtered)
-            st.sidebar.download_button(
-                label="📥 Download Report Excel v17",
-                data=excel_data,
-                file_name=f"Analisa_BEI_{date.today()}_v17.xlsx",
-                mime="application/vnd.ms-excel"
-            )
+                src_note = "📸 Screenshot Yahoo Finance + data OHLCV" if has_ss else "📊 Data OHLCV saja (screenshot gagal)"
+                st.caption(
+                    f"Sumber: {src_note} · "
+                    f"[Lihat chart Yahoo Finance ↗](https://finance.yahoo.com/quote/{selected_for_ai}.JK/)"
+                )
 
-            # ── Legenda ──
-            with st.expander("📖 Legenda Indikator v16"):
-                st.markdown("""
+                png_bytes = st.session_state.ai_screenshot.get(selected_for_ai)
+                if png_bytes:
+                    with st.expander("📷 Screenshot Chart Yahoo Finance"):
+                        st.image(png_bytes, use_container_width=True)
+
+            # Riwayat analisa sesi ini
+            done = [k for k in ticker_options if k in st.session_state.ai_results]
+            if len(done) > 1:
+                with st.expander(f"📋 Riwayat analisa sesi ini ({len(done)} saham)"):
+                    for tk in done:
+                        r  = st.session_state.ai_results[tk]
+                        c2 = next((v for k, v in LABEL_COLOR.items() if k in r["label"]), "#888888")
+                        st.markdown(
+                            f'**{tk}** — <span style="background:{c2};color:white;'
+                            f'padding:2px 10px;border-radius:12px;font-size:0.85em;">'
+                            f'{r["label"]}</span> &nbsp; {r["reasoning"]}',
+                            unsafe_allow_html=True
+                        )
+
+        # ── Download ──
+        df_s_dl    = df_res[df_res['Kode Saham'].isin(shortlist)] if not df_res.empty else pd.DataFrame()
+        df_w_dl    = df_res[df_res['Kode Saham'].isin(prebreakout_list)] if not df_res.empty else pd.DataFrame()
+        excel_data = to_excel_report(df_s_dl, df_w_dl, df_res_filtered)
+        st.sidebar.download_button(
+            label="📥 Download Report Excel v17",
+            data=excel_data,
+            file_name=f"Analisa_BEI_{date.today()}_v17.xlsx",
+            mime="application/vnd.ms-excel"
+        )
+
+        # ── Legenda ──
+        with st.expander("📖 Legenda Indikator v16"):
+            st.markdown("""
 | Kolom | Penjelasan |
 |---|---|
 | **MFI (14D)** | Money Flow Index 14 hari. > 80 = overbought (merah), < 40 = oversold (hijau) |
@@ -1228,9 +1253,6 @@ if btn_analisa:
 | **Early Momentum Score** 🆕 | Skor 0–10 sinyal awal: MFI Change + ADX Rising + MA20 + RSI + Float. ≥6 = menarik, ≥8 = kuat |
 | **Pre-Breakout Watch** 🆕 | `🔭 Watch` = saham dengan sinyal akumulasi awal tapi belum breakout. Pantau 1–3 hari ke depan |
 """)
-
-        else:
-            st.error("Data gagal diambil untuk range tanggal tersebut. Coba perlebar range tanggal.")
 
 else:
     st.info(
