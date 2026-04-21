@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -17,15 +18,13 @@ import json
 # ─────────────────────────────────────────────
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI v16", layout="wide")
-st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v16 – Pre-Breakout Radar")
+st.set_page_config(page_title="Monitor Saham BEI v17", layout="wide")
+st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v17 – Pre-Breakout Radar")
 
 st.markdown("""
-**Update v16:**
-- ✅ Semua fitur v15 dipertahankan
-- 🆕 **Opsi A: Pre-Breakout Watch List** — tangkap saham dengan MFI Change tinggi SEBELUM breakout/consec up
-- 🆕 **Opsi C: Early Momentum Score** — skor komposit MFI Change + ADX Rising + Above MA20 sebagai sinyal awal
-- 💡 Terinspirasi dari MDIA (17 Apr): MFI Change tertinggi +72.7, ADX Rising, tapi belum breakout — naik +21% esoknya
+**Update v17:**
+- ✅ Semua fitur v16 dipertahankan
+- 🆕 **TradingView Widget** — klik nama saham di tabel → chart TradingView langsung muncul di bawahnya, tanpa pindah aplikasi
 """)
 
 # ─────────────────────────────────────────────
@@ -168,6 +167,53 @@ def style_prebreakout(val):
     if val == '🔭 Watch':
         return 'background-color: #7b2d8b; color: white; font-weight: bold'
     return ''
+
+# ─────────────────────────────────────────────
+# 3b. TRADINGVIEW WIDGET
+# ─────────────────────────────────────────────
+def show_tradingview_widget(ticker_code: str):
+    """
+    Menampilkan TradingView Advanced Chart Widget untuk saham BEI.
+    ticker_code: kode saham tanpa .JK, misal 'BBCA'
+    """
+    tv_symbol = f"IDX:{ticker_code}"
+    widget_html = f"""
+    <div style="border:1px solid #e0e0e0; border-radius:12px; overflow:hidden; box-shadow:0 2px 12px rgba(0,0,0,0.10);">
+      <div class="tradingview-widget-container" style="height:500px; width:100%;">
+        <div id="tradingview_{ticker_code}" style="height:100%; width:100%;"></div>
+        <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+        <script type="text/javascript">
+        new TradingView.widget({{
+          "autosize": true,
+          "symbol": "{tv_symbol}",
+          "interval": "D",
+          "timezone": "Asia/Jakarta",
+          "theme": "light",
+          "style": "1",
+          "locale": "id",
+          "toolbar_bg": "#f1f3f6",
+          "enable_publishing": false,
+          "allow_symbol_change": true,
+          "container_id": "tradingview_{ticker_code}",
+          "studies": [
+            "MASimple@tv-basicstudies",
+            "RSI@tv-basicstudies",
+            "MFI@tv-basicstudies",
+            "ADX@tv-basicstudies"
+          ],
+          "show_popup_button": true,
+          "popup_width": "1000",
+          "popup_height": "650"
+        }});
+        </script>
+      </div>
+    </div>
+    <p style="font-size:11px; color:#888; margin-top:4px; text-align:right;">
+      Powered by <a href="https://www.tradingview.com/" target="_blank">TradingView</a>
+    </p>
+    """
+    components.html(widget_html, height=540, scrolling=False)
+
 
 # ─────────────────────────────────────────────
 # 4. EXPORT EXCEL
@@ -866,6 +912,10 @@ if btn_analisa:
 
             all_display_cols = base_cols + score_col + watch_col + reason_col
 
+            # Inisialisasi session_state TradingView
+            if "tv_ticker" not in st.session_state:
+                st.session_state.tv_ticker = None
+
             # ── TAB LAYOUT ──
             tab1, tab2, tab3 = st.tabs([
                 "🔥 Shortlist Utama",
@@ -887,6 +937,21 @@ if btn_analisa:
                         apply_full_style(df_s[cols_s].style, include_score=show_score_in_table),
                         use_container_width=True
                     )
+
+                    # ── TradingView Widget ──
+                    st.markdown("#### 📈 TradingView Chart")
+                    st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
+                    ticker_list_s = df_s['Kode Saham'].tolist()
+                    # Jaga nilai default jika tv_ticker sudah ada di list ini
+                    default_idx_s = ticker_list_s.index(st.session_state.tv_ticker) \
+                        if st.session_state.tv_ticker in ticker_list_s else 0
+                    selected_tv_s = st.selectbox(
+                        "🔍 Pilih saham untuk chart:", ticker_list_s,
+                        index=default_idx_s, key="tv_select_tab1"
+                    )
+                    if selected_tv_s:
+                        st.session_state.tv_ticker = selected_tv_s
+                        show_tradingview_widget(selected_tv_s)
 
                     st.markdown("#### 📋 Ringkasan Kandidat Shortlist")
                     for _, row in df_s.iterrows():
@@ -944,6 +1009,20 @@ if btn_analisa:
                             ),
                             use_container_width=True
                         )
+
+                        # ── TradingView Widget ──
+                        st.markdown("#### 📈 TradingView Chart")
+                        st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
+                        ticker_list_w = df_watch['Kode Saham'].tolist()
+                        default_idx_w = ticker_list_w.index(st.session_state.tv_ticker) \
+                            if st.session_state.tv_ticker in ticker_list_w else 0
+                        selected_tv_w = st.selectbox(
+                            "🔍 Pilih saham untuk chart:", ticker_list_w,
+                            index=default_idx_w, key="tv_select_tab2"
+                        )
+                        if selected_tv_w:
+                            st.session_state.tv_ticker = selected_tv_w
+                            show_tradingview_widget(selected_tv_w)
 
                         st.markdown("#### 📋 Ringkasan Pre-Breakout Candidates")
                         for _, row in df_watch.iterrows():
@@ -1011,6 +1090,20 @@ if btn_analisa:
                         use_container_width=True,
                         height=500
                     )
+
+                    # ── TradingView Widget ──
+                    st.markdown("#### 📈 TradingView Chart")
+                    st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
+                    ticker_list_all = df_sorted['Kode Saham'].tolist()
+                    default_idx_all = ticker_list_all.index(st.session_state.tv_ticker) \
+                        if st.session_state.tv_ticker in ticker_list_all else 0
+                    selected_tv_all = st.selectbox(
+                        "🔍 Pilih saham untuk chart:", ticker_list_all,
+                        index=default_idx_all, key="tv_select_tab3"
+                    )
+                    if selected_tv_all:
+                        st.session_state.tv_ticker = selected_tv_all
+                        show_tradingview_widget(selected_tv_all)
                 else:
                     st.info("Tidak ada data yang memenuhi filter.")
 
@@ -1108,9 +1201,9 @@ if btn_analisa:
             df_w_dl    = df_res[df_res['Kode Saham'].isin(prebreakout_list)] if not df_res.empty else pd.DataFrame()
             excel_data = to_excel_report(df_s_dl, df_w_dl, df_res_filtered)
             st.sidebar.download_button(
-                label="📥 Download Report Excel v16",
+                label="📥 Download Report Excel v17",
                 data=excel_data,
-                file_name=f"Analisa_BEI_{date.today()}_v16.xlsx",
+                file_name=f"Analisa_BEI_{date.today()}_v17.xlsx",
                 mime="application/vnd.ms-excel"
             )
 
@@ -1142,11 +1235,7 @@ if btn_analisa:
 else:
     st.info(
         f"📂 Database: **{loaded_file}**\n\n"
-        "**Perubahan utama v16:**\n"
-        "- 🆕 **Opsi A — Pre-Breakout Watch List**: tangkap saham dengan MFI Change tinggi SEBELUM harga breakout\n"
-        "- 🆕 **Opsi C — Early Momentum Score**: skor komposit 0–10, saham dengan skor ≥ 6 tapi belum shortlist = kandidat radar\n"
-        "- 🆕 Tab terpisah: Shortlist Utama | Pre-Breakout Watch | Semua Analisa\n"
-        "- 🆕 Sort tabel 'Semua Analisa' by Early Momentum Score (default) — kandidat terbaik di atas\n"
-        "- 🆕 Download Excel sekarang include sheet 'Pre-Breakout Watch'\n"
-        "- ✅ Semua fitur v15 dipertahankan (AI Chart Analysis, ADX DI+/DI-, dll)"
+        "**Perubahan utama v17:**\n"
+        "- 🆕 **TradingView Widget**: klik nama saham di tiap tab → chart TradingView (candlestick + RSI + MFI + ADX) muncul langsung di dashboard\n"
+        "- ✅ Semua fitur v16 dipertahankan (Opsi A Pre-Breakout, Opsi C Early Momentum Score, AI Chart Analysis, dll)"
     )
