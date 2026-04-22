@@ -18,13 +18,18 @@ import json
 # ─────────────────────────────────────────────
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI v17", layout="wide")
-st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v17 – Pre-Breakout Radar")
+st.set_page_config(page_title="Monitor Saham BEI v18", layout="wide")
+st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v18 – Silent Accumulation Radar")
 
 st.markdown("""
-**Update v17:**
-- ✅ Semua fitur v16 dipertahankan
-- 🆕 **TradingView Widget** — klik nama saham di tabel → chart TradingView langsung muncul di bawahnya, tanpa pindah aplikasi
+**Update v18:**
+- ✅ Semua fitur v17 dipertahankan (Shortlist, Pre-Breakout Watch, Early Momentum Score, TradingView Widget, AI Chart Analysis)
+- 🆕 **Tab 4: Silent Accumulation Radar** — mendeteksi saham seperti KOTA *sebelum* terbang:
+  - Volume rendah tapi mulai naik (lolos filter vol absolut yang terlalu ketat)
+  - Harga sideways konsolidasi tapi MFI / OBV mulai menanjak diam-diam
+  - Bollinger Band menyempit (squeeze) → potensi explosive move
+  - Body candle konsisten kecil tapi arah naik (akumulasi terselubung)
+- 🆕 **Filter volume terpisah** untuk Silent Accumulation (lebih rendah dari filter utama)
 """)
 
 # ─────────────────────────────────────────────
@@ -167,6 +172,27 @@ def style_prebreakout(val):
     if val == '🔭 Watch':
         return 'background-color: #7b2d8b; color: white; font-weight: bold'
     return ''
+
+def style_silent_score(val):
+    """Styling untuk Silent Accumulation Score"""
+    try:
+        num = float(val)
+        if num >= 8:  return 'background-color: #c0392b; color: white; font-weight: bold'
+        if num >= 6:  return 'background-color: #e67e22; color: white; font-weight: bold'
+        if num >= 4:  return 'background-color: #f39c12; color: #333; font-weight: bold'
+    except:
+        pass
+    return ''
+
+def style_bb_squeeze(val):
+    if val == 'SQUEEZE 🔥': return 'background-color: #6c3483; color: white; font-weight: bold'
+    if val == 'Sempit':     return 'background-color: #a569bd; color: white;'
+    return ''
+
+def style_obv_trend(val):
+    if val == 'Rising ↑': return 'color: #1a8c1a; font-weight: bold;'
+    if val == 'Falling ↓': return 'color: #cc0000;'
+    return 'color: gray;'
 
 # ─────────────────────────────────────────────
 # 3b. TRADINGVIEW WIDGET
@@ -407,15 +433,198 @@ def is_prebreakout_candidate(
     return True
 
 # ─────────────────────────────────────────────
+# 5e. SILENT ACCUMULATION DETECTOR (v18)
+# ─────────────────────────────────────────────
+def detect_bb_squeeze(close: pd.Series, window: int = 20, squeeze_pct: float = 0.06) -> tuple:
+    """
+    Deteksi Bollinger Band Squeeze.
+    Returns: (squeeze_label, bb_width_pct)
+    - 'SQUEEZE 🔥' jika BB sangat sempit (< squeeze_pct dari harga)
+    - 'Sempit'     jika BB sempit tapi belum extreme
+    - 'Normal'     sisanya
+    """
+    if len(close) < window + 5:
+        return "Normal", 0.0
+    ma   = close.rolling(window).mean()
+    std  = close.rolling(window).std()
+    upper = ma + 2 * std
+    lower = ma - 2 * std
+    bb_width = (upper - lower) / ma  # normalized width
+
+    current_width = float(bb_width.iloc[-1]) if not bb_width.empty else 1.0
+    # Bandingkan dengan lebar 50 hari terakhir → apakah sekarang termasuk yang tersempit?
+    hist_width = bb_width.dropna().tail(50)
+    pct_rank   = (hist_width <= current_width).mean()  # 0–1: semakin kecil = semakin sempit
+
+    if pct_rank <= 0.10:       # 10% tersempit dalam 50 hari
+        return "SQUEEZE 🔥", round(current_width * 100, 2)
+    elif pct_rank <= 0.25:
+        return "Sempit", round(current_width * 100, 2)
+    else:
+        return "Normal", round(current_width * 100, 2)
+
+
+def compute_obv_trend(close: pd.Series, volume: pd.Series, lookback: int = 10) -> str:
+    """Hitung tren OBV (On-Balance Volume) dalam N hari terakhir."""
+    if len(close) < lookback + 2 or len(volume) < lookback + 2:
+        return "Flat"
+    direction = close.diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    obv = (direction * volume).cumsum()
+    obv_tail = obv.tail(lookback)
+    # Regresi linear sederhana: slope positif = OBV naik
+    x = range(len(obv_tail))
+    slope = np.polyfit(x, obv_tail.values, 1)[0]
+    if slope > 0:
+        return "Rising ↑"
+    elif slope < 0:
+        return "Falling ↓"
+    return "Flat"
+
+
+def compute_price_tightness(close: pd.Series, lookback: int = 10) -> float:
+    """
+    Ukur seberapa 'ketat' pergerakan harga dalam N hari terakhir.
+    Returns: koefisien variasi (CV) dalam %. Semakin kecil = harga makin sideways/ketat.
+    """
+    if len(close) < lookback:
+        return 100.0
+    tail = close.tail(lookback)
+    cv = (tail.std() / tail.mean() * 100) if tail.mean() > 0 else 100.0
+    return round(float(cv), 2)
+
+
+def compute_vol_trend_ratio(volume: pd.Series, short: int = 5, long: int = 20) -> float:
+    """
+    Rasio rata-rata volume jangka pendek vs jangka panjang.
+    > 1.0 = volume mulai naik. Ini menangkap kenaikan volume diam-diam.
+    """
+    if len(volume) < long:
+        return 1.0
+    avg_short = float(volume.tail(short).mean())
+    avg_long  = float(volume.tail(long).mean())
+    return round(avg_short / avg_long, 2) if avg_long > 0 else 1.0
+
+
+def compute_silent_score(
+    bb_squeeze: str,
+    obv_trend: str,
+    vol_trend_ratio: float,
+    price_tightness: float,
+    mfi_change_5d: float,
+    adx_trend: str,
+    is_adx_bullish: bool,
+    free_float: float,
+    has_bearish_div: bool,
+    last_rsi: float,
+    is_above_ma20: str,
+) -> int:
+    """
+    Skor 0–10 untuk mendeteksi akumulasi diam-diam (pola KOTA).
+
+    Komponen:
+      +3  BB Squeeze (harga terkompresi, siap meledak)
+      +1  BB Sempit (tidak sampai squeeze, tapi menyempit)
+      +2  OBV Rising (volume masuk diam-diam, konfirmasi akumulasi)
+      +2  Vol Trend Ratio >= 1.3 (volume 5D mulai > rata-rata 20D)
+      +1  Vol Trend Ratio >= 1.1 (kenaikan volume tipis)  [kumulatif maks 2]
+      +1  Price Tightness < 3% (harga sideways ketat = akumulasi)
+      +1  MFI Change 5D > 0 (uang mulai masuk walau kecil)
+      +1  ADX Trend Rising (momentum mulai)
+      +1  ADX Bullish (DI+ > DI-)
+      +1  Free Float < 15% (potensi explosive)
+      -2  Bearish Divergence
+      -1  RSI > 70 (sudah overbought, terlambat)
+      -1  Above MA20 = TIDAK (di bawah MA20)
+    """
+    score = 0
+
+    if bb_squeeze == "SQUEEZE 🔥":
+        score += 3
+    elif bb_squeeze == "Sempit":
+        score += 1
+
+    if obv_trend == "Rising ↑":
+        score += 2
+
+    if vol_trend_ratio >= 1.3:
+        score += 2
+    elif vol_trend_ratio >= 1.1:
+        score += 1
+
+    if price_tightness < 3.0:
+        score += 1
+
+    if mfi_change_5d > 0:
+        score += 1
+
+    if adx_trend == "Rising":
+        score += 1
+
+    if is_adx_bullish:
+        score += 1
+
+    if 0 < free_float < 15:
+        score += 1
+
+    if has_bearish_div:
+        score -= 2
+
+    if last_rsi > 70:
+        score -= 1
+
+    if is_above_ma20 != "YA":
+        score -= 1
+
+    return max(0, min(score, 10))
+
+
+def is_silent_accumulation_candidate(
+    silent_score: int,
+    min_silent_score: int,
+    bb_squeeze: str,
+    obv_trend: str,
+    vol_trend_ratio: float,
+    has_bearish_div: bool,
+    last_rsi: float,
+    avg_vol20_lot: float,
+    min_vol_silent_lot: float,
+) -> bool:
+    """
+    Kandidat Silent Accumulation:
+    - Lolos volume minimum yang lebih rendah (bukan filter utama)
+    - Skor silent >= threshold
+    - Minimal 1 dari: BB Squeeze ATAU OBV Rising ATAU Vol Trend >= 1.2
+    - Tidak divergence, tidak overbought
+    """
+    if has_bearish_div:
+        return False
+    if last_rsi > 75:
+        return False
+    if avg_vol20_lot < min_vol_silent_lot:
+        return False
+    if silent_score < min_silent_score:
+        return False
+    # Minimal ada 1 sinyal kuat
+    has_key_signal = (
+        bb_squeeze in ("SQUEEZE 🔥", "Sempit")
+        or obv_trend == "Rising ↑"
+        or vol_trend_ratio >= 1.2
+    )
+    return has_key_signal
+
+# ─────────────────────────────────────────────
 # 6. FUNGSI ANALISA UTAMA v16
 # ─────────────────────────────────────────────
 def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
                           min_mfi_change_watch, min_early_score,
-                          watch_require_outperform):
+                          watch_require_outperform,
+                          min_vol_silent_lot, min_silent_score):
     results = []
     shortlist_keys = []
     prebreakout_keys = []
+    silent_accum_keys = []
     min_vol_lembar = min_vol_lot * 100
+    min_vol_silent_lembar = min_vol_silent_lot * 100
     ff_lookup = dict(zip(df_ref['Kode Saham'], df_ref['Free Float']))
 
     ihsg_c = df_c["^JKSE"].dropna() if "^JKSE" in df_c.columns else pd.Series()
@@ -435,10 +644,13 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
             continue
 
         # ── Volume filter ──
+        # Gunakan min_vol_silent_lembar sebagai floor absolut agar saham low-cap tetap masuk proses
         avg_vol20 = v.rolling(20).mean().iloc[-1]
         avg_vol50 = v.rolling(50).mean().iloc[-1]
-        if avg_vol20 < min_vol_lembar:
+        if avg_vol20 < min_vol_silent_lembar:   # filter paling longgar (silent threshold)
             continue
+        # Flag apakah lolos filter utama (untuk shortlist & pre-breakout)
+        passes_main_vol = avg_vol20 >= min_vol_lembar
 
         rel_vol_20 = v.iloc[-1] / avg_vol20 if avg_vol20 > 0 else 0.0
         rel_vol_50 = v.iloc[-1] / avg_vol50 if avg_vol50 > 0 else 0.0
@@ -542,6 +754,27 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
             has_bearish_div=has_bearish_div,
         )
 
+        # ── V18: SILENT ACCUMULATION INDICATORS ──
+        bb_squeeze_label, bb_width_pct = detect_bb_squeeze(c, window=20)
+        obv_trend_label   = compute_obv_trend(c, v, lookback=10)
+        vol_trend_ratio   = compute_vol_trend_ratio(v, short=5, long=20)
+        price_tightness   = compute_price_tightness(c, lookback=10)
+        avg_vol20_lot     = avg_vol20 / 100
+
+        silent_score = compute_silent_score(
+            bb_squeeze      = bb_squeeze_label,
+            obv_trend       = obv_trend_label,
+            vol_trend_ratio = vol_trend_ratio,
+            price_tightness = price_tightness,
+            mfi_change_5d   = mfi_change_5d,
+            adx_trend       = adx_trend,
+            is_adx_bullish  = is_adx_bullish,
+            free_float      = free_float,
+            has_bearish_div = has_bearish_div,
+            last_rsi        = last_rsi,
+            is_above_ma20   = is_above_ma20,
+        )
+
         # ── REASONS ──
         reasons = []
         if rel_vol >= 2.0 and p_change_today > 1.0:
@@ -557,7 +790,8 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
 
         # ── SHORTLIST LOGIC v13 ──
         is_shortlist = (
-            len(reasons) >= 3
+            passes_main_vol          # harus lolos filter volume utama
+            and len(reasons) >= 3
             and rs == "Outperform"
             and is_above_ma20 == "YA"
             and last_mfi >= 55
@@ -574,7 +808,8 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
         # ── OPSI A: PRE-BREAKOUT WATCH LIST ──
         watch_rs_ok = (rs == "Outperform") if watch_require_outperform else True
         is_watch = (
-            not is_shortlist  # jangan duplikat dengan shortlist
+            passes_main_vol          # harus lolos filter volume utama
+            and not is_shortlist
             and watch_rs_ok
             and is_prebreakout_candidate(
                 mfi_change_5d=mfi_change_5d,
@@ -592,8 +827,27 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
             )
         )
 
+        # ── V18: SILENT ACCUMULATION ──
+        is_silent = (
+            not is_shortlist
+            and not is_watch
+            and is_silent_accumulation_candidate(
+                silent_score      = silent_score,
+                min_silent_score  = min_silent_score,
+                bb_squeeze        = bb_squeeze_label,
+                obv_trend         = obv_trend_label,
+                vol_trend_ratio   = vol_trend_ratio,
+                has_bearish_div   = has_bearish_div,
+                last_rsi          = last_rsi,
+                avg_vol20_lot     = avg_vol20_lot,
+                min_vol_silent_lot= min_vol_silent_lot,
+            )
+        )
+
         if is_watch:
             prebreakout_keys.append(ticker_name)
+        if is_silent:
+            silent_accum_keys.append(ticker_name)
 
         results.append({
             'Kode Saham':            ticker_name,
@@ -616,14 +870,22 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
             'Rel Vol (50D)':         float(rel_vol_50),
             'Consec Up Days':        consecutive_up,
             'AvgVol20 (Lot)':        int(avg_vol20 / 100),
-            'Early Momentum Score':  early_score,        # OPSI C
-            'Pre-Breakout Watch':    '🔭 Watch' if is_watch else '',  # OPSI A
+            'Early Momentum Score':  early_score,
+            'Pre-Breakout Watch':    '🔭 Watch' if is_watch else '',
+            # V18: Silent Accumulation columns
+            'BB Squeeze':            bb_squeeze_label,
+            'BB Width (%)':          bb_width_pct,
+            'OBV Trend':             obv_trend_label,
+            'Vol Trend Ratio':       vol_trend_ratio,
+            'Price Tightness (%)':   price_tightness,
+            'Silent Score':          silent_score,
+            'Silent Accum':          '🕵️ Silent' if is_silent else '',
             'Shortlist Reasons':     ", ".join(reasons) if reasons else "",
             'Chart Analysis':        chart_analysis,
         })
 
     df_results = pd.DataFrame(results)
-    return df_results, shortlist_keys, prebreakout_keys
+    return df_results, shortlist_keys, prebreakout_keys, silent_accum_keys
 
 # ─────────────────────────────────────────────
 # 6b. AI CHART ANALYSIS ENGINE (v15)
@@ -809,7 +1071,21 @@ watch_require_outperform = st.sidebar.checkbox(
     help="Matikan untuk tidak mensyaratkan Market RS = Outperform di pre-breakout")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚡ Opsi C: Early Momentum Score")
+st.sidebar.subheader("🕵️ V18: Silent Accumulation Radar")
+st.sidebar.caption(
+    "Mendeteksi akumulasi diam-diam seperti pola KOTA sebelum terbang. "
+    "Menggunakan BB Squeeze + OBV + Vol Trend — tidak butuh volume besar."
+)
+enable_silent        = st.sidebar.checkbox("Aktifkan Silent Accumulation Radar", value=True)
+min_vol_silent_lot   = st.sidebar.number_input(
+    "Min Avg Vol 20D untuk Silent (LOT)", value=10000, step=1000,
+    help="Jauh lebih rendah dari filter utama. Menangkap saham low-cap yang diakumulasi diam-diam.")
+min_silent_score     = st.sidebar.slider(
+    "Min Silent Accumulation Score", min_value=0, max_value=10, value=5,
+    help="≥6 = sinyal kuat. ≥8 = potensi explosive (tapi sabar, belum tentu langsung naik)")
+silent_require_squeeze = st.sidebar.checkbox(
+    "Wajib BB Squeeze / Sempit", value=False,
+    help="Aktifkan untuk hanya tampilkan kandidat dengan Bollinger Band sedang menyempit")
 st.sidebar.caption("Skor 0–10 gabungan: MFI Change + ADX Rising + MA20 + RSI + Float kecil. "
                    "Saham dengan skor tinggi tapi belum shortlist = kandidat liar.")
 min_early_score = st.sidebar.slider(
@@ -838,7 +1114,7 @@ FORMAT_DICT = {
     'Dist to 20D High (%)':  "{:.2f}%",
 }
 
-def apply_full_style(df_styled, include_score=True, include_watch=False):
+def apply_full_style(df_styled, include_score=True, include_watch=False, include_silent=False):
     styled = (df_styled
               .map(style_mfi,           subset=['MFI (14D)'])
               .map(style_market_rs,     subset=['Market RS'])
@@ -855,6 +1131,13 @@ def apply_full_style(df_styled, include_score=True, include_watch=False):
         styled = styled.map(style_early_momentum, subset=['Early Momentum Score'])
     if include_watch and 'Pre-Breakout Watch' in df_styled.data.columns:
         styled = styled.map(style_prebreakout, subset=['Pre-Breakout Watch'])
+    if include_silent:
+        if 'Silent Score' in df_styled.data.columns:
+            styled = styled.map(style_silent_score, subset=['Silent Score'])
+        if 'BB Squeeze' in df_styled.data.columns:
+            styled = styled.map(style_bb_squeeze, subset=['BB Squeeze'])
+        if 'OBV Trend' in df_styled.data.columns:
+            styled = styled.map(style_obv_trend, subset=['OBV Trend'])
     return styled
 
 # ─────────────────────────────────────────────
@@ -874,11 +1157,13 @@ if btn_analisa:
         df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
 
         if not df_c.empty:
-            df_res, shortlist, prebreakout_list = get_signals_and_data(
+            df_res, shortlist, prebreakout_list, silent_list = get_signals_and_data(
                 df_c, df_v, df_h, df_l, df_emiten, min_vol_lot,
                 min_mfi_change_watch=min_mfi_change_watch,
                 min_early_score=min_early_score,
                 watch_require_outperform=watch_require_outperform,
+                min_vol_silent_lot=min_vol_silent_lot,
+                min_silent_score=min_silent_score,
             )
 
             # ── Filter umum (berlaku untuk semua tabel) ──
@@ -907,10 +1192,11 @@ if btn_analisa:
 
             # ── Simpan semua hasil ke session_state ──
             st.session_state.analisa_hasil = {
-                "df_res":          df_res,
-                "shortlist":       shortlist,
+                "df_res":           df_res,
+                "shortlist":        shortlist,
                 "prebreakout_list": prebreakout_list,
-                "df_res_filtered": df_res_filtered,
+                "silent_list":      silent_list,
+                "df_res_filtered":  df_res_filtered,
             }
             st.session_state.tv_ticker = None  # reset pilihan chart saat analisa baru
 
@@ -923,6 +1209,7 @@ if st.session_state.analisa_hasil is not None:
     df_res           = _h["df_res"]
     shortlist        = _h["shortlist"]
     prebreakout_list = _h["prebreakout_list"]
+    silent_list      = _h.get("silent_list", [])
     df_res_filtered  = _h["df_res_filtered"]
 
     if not df_res.empty:
@@ -935,16 +1222,18 @@ if st.session_state.analisa_hasil is not None:
             'Dist to 20D High (%)', 'Last Price', 'Rel Vol (20D)', 'Rel Vol (50D)',
             'Consec Up Days', 'AvgVol20 (Lot)',
         ]
-        score_col  = ['Early Momentum Score'] if show_score_in_table else []
-        watch_col  = ['Pre-Breakout Watch']
-        reason_col = ['Shortlist Reasons', 'Chart Analysis']
+        score_col   = ['Early Momentum Score'] if show_score_in_table else []
+        watch_col   = ['Pre-Breakout Watch']
+        silent_col  = ['Silent Score', 'BB Squeeze', 'OBV Trend', 'Vol Trend Ratio', 'Silent Accum']
+        reason_col  = ['Shortlist Reasons', 'Chart Analysis']
 
-        all_display_cols = base_cols + score_col + watch_col + reason_col
+        all_display_cols = base_cols + score_col + watch_col + silent_col + reason_col
 
         # ── TAB LAYOUT ──
-        tab1, tab2, tab3 = st.tabs([
+        tab1, tab2, tab3, tab4 = st.tabs([
             "🔥 Shortlist Utama",
             "🔭 Pre-Breakout Watch (Opsi A)",
+            "🕵️ Silent Accumulation (v18)",
             "🔍 Semua Hasil Analisa",
         ])
 
@@ -1090,19 +1379,168 @@ if st.session_state.analisa_hasil is not None:
                             "Coba turunkan 'Min MFI Change 5D untuk Watch' atau 'Min Early Momentum Score' di sidebar.")
 
         # ═══════════════════════════════════════
-        # TAB 3: SEMUA HASIL ANALISA
+        # TAB 3: SILENT ACCUMULATION RADAR (v18)
         # ═══════════════════════════════════════
         with tab3:
+            st.subheader("🕵️ Silent Accumulation Radar (v18)")
+            st.markdown("""
+> **Filosofi:** Menangkap saham seperti **KOTA** — sideways panjang, volume rendah, tapi ada akumulasi
+> diam-diam yang terdeteksi dari **Bollinger Band Squeeze + OBV Rising + Vol Trend naik**.
+> Screener ini menggunakan filter volume yang jauh lebih rendah dari shortlist utama.
+>
+> ⚠️ **Ini adalah sinyal paling awal dan paling berisiko.** Tidak ada kepastian kapan bergerak.
+> Sizing sangat kecil. Wajib pasang stop loss. Gunakan sebagai watchlist, bukan buy signal langsung.
+""")
+            if not enable_silent:
+                st.warning("Silent Accumulation Radar dinonaktifkan. Aktifkan di sidebar.")
+            else:
+                df_silent_raw = df_res[df_res['Kode Saham'].isin(silent_list)].copy()
+
+                # Filter harga saja — volume sudah ditangani di logic internal
+                if not df_silent_raw.empty:
+                    silent_mask = (
+                        (df_silent_raw['Last Price'] >= min_p) &
+                        (df_silent_raw['Last Price'] <= max_p) &
+                        (df_silent_raw['Free Float (%)'] <= max_ff)
+                    )
+                    if silent_require_squeeze:
+                        silent_mask &= df_silent_raw['BB Squeeze'].isin(['SQUEEZE 🔥', 'Sempit'])
+                    df_silent = df_silent_raw[silent_mask].copy()
+                    df_silent = df_silent.sort_values('Silent Score', ascending=False)
+                else:
+                    df_silent = pd.DataFrame()
+
+                if not df_silent.empty:
+                    # Kolom khusus silent accumulation
+                    silent_cols = [
+                        'Kode Saham', 'Last Price', 'Free Float (%)', 'AvgVol20 (Lot)',
+                        'Silent Score', 'BB Squeeze', 'BB Width (%)', 'OBV Trend',
+                        'Vol Trend Ratio', 'Price Tightness (%)',
+                        'MFI (14D)', 'MFI Change 5D', 'RSI (14)',
+                        'ADX (14)', 'ADX Direction', 'ADX Trend',
+                        'Above MA20', 'Dist to 20D High (%)', 'Rel Vol (20D)',
+                        'Divergence Warning', 'Market RS', 'Chart Analysis',
+                    ]
+                    cols_s = [c for c in silent_cols if c in df_silent.columns]
+
+                    def apply_silent_style(df_styled):
+                        styled = (df_styled
+                            .map(style_silent_score,  subset=['Silent Score'])
+                            .map(style_bb_squeeze,    subset=['BB Squeeze'])
+                            .map(style_obv_trend,     subset=['OBV Trend'])
+                            .map(style_mfi,           subset=['MFI (14D)'])
+                            .map(style_market_rs,     subset=['Market RS'])
+                            .map(style_ma_filter,     subset=['Above MA20'])
+                            .map(style_adx_trend,     subset=['ADX Trend'])
+                            .map(style_adx_dir,       subset=['ADX Direction'])
+                            .map(style_divergence,    subset=['Divergence Warning'])
+                            .map(style_chart_analysis,subset=['Chart Analysis'])
+                            .format({
+                                'Free Float (%)':       '{:.1f}%',
+                                'MFI (14D)':            '{:.1f}',
+                                'MFI Change 5D':        '{:+.1f}',
+                                'RSI (14)':             '{:.1f}',
+                                'ADX (14)':             '{:.1f}',
+                                'BB Width (%)':         '{:.2f}%',
+                                'Vol Trend Ratio':      '{:.2f}x',
+                                'Price Tightness (%)':  '{:.2f}%',
+                                'Dist to 20D High (%)': '{:.2f}%',
+                                'Rel Vol (20D)':        '{:.2f}x',
+                            }, na_rep="-")
+                        )
+                        return styled
+
+                    st.dataframe(
+                        apply_silent_style(df_silent[cols_s].style),
+                        use_container_width=True,
+                        height=420,
+                    )
+
+                    # ── TradingView Widget ──
+                    st.markdown("#### 📈 TradingView Chart")
+                    st.caption("Klik nama saham di dropdown untuk melihat chart.")
+                    ticker_list_si = df_silent['Kode Saham'].tolist()
+                    default_idx_si = ticker_list_si.index(st.session_state.tv_ticker) \
+                        if st.session_state.tv_ticker in ticker_list_si else 0
+                    selected_tv_si = st.selectbox(
+                        "🔍 Pilih saham untuk chart:", ticker_list_si,
+                        index=default_idx_si, key="tv_select_tab3"
+                    )
+                    if selected_tv_si:
+                        st.session_state.tv_ticker = selected_tv_si
+                        show_tradingview_widget(selected_tv_si)
+
+                    # ── Ringkasan kandidat ──
+                    st.markdown("#### 📋 Ringkasan Silent Accumulation Candidates")
+                    for _, row in df_silent.iterrows():
+                        sc   = int(row['Silent Score'])
+                        badge = "🔴" if sc >= 8 else ("🟠" if sc >= 6 else "🟡")
+                        sq   = row.get('BB Squeeze', 'Normal')
+                        obv  = row.get('OBV Trend', '-')
+                        vtr  = row.get('Vol Trend Ratio', 1.0)
+                        pt   = row.get('Price Tightness (%)', 0.0)
+                        ff_note = " ⚡Float kecil!" if row['Free Float (%)'] < 15 else ""
+                        st.markdown(
+                            f"{badge} **{row['Kode Saham']}** | "
+                            f"Rp {row['Last Price']:,} | "
+                            f"AvgVol: {int(row['AvgVol20 (Lot)']):,} lot | "
+                            f"Silent Score: **{sc}**/10 | "
+                            f"BB: **{sq}** | OBV: **{obv}** | "
+                            f"Vol Trend: {vtr:.2f}x | Price Tightness: {pt:.1f}%"
+                            f"{ff_note}"
+                        )
+
+                    # ── Cara baca ──
+                    with st.expander("📖 Cara Baca Silent Accumulation Score & Indikator"):
+                        st.markdown("""
+**Silent Accumulation Score (0–10)** — Mendeteksi akumulasi sebelum harga bergerak:
+
+| Skor | Komponen | Keterangan |
+|------|----------|------------|
+| +3 | BB Squeeze 🔥 | Bollinger Band dalam 10% tersempit selama 50 hari → energi terkompresi |
+| +1 | BB Sempit | BB dalam 25% tersempit → mulai menyempit |
+| +2 | OBV Rising ↑ | On-Balance Volume naik → volume beli > jual secara kumulatif |
+| +2 | Vol Trend Ratio ≥ 1.3 | Volume 5D rata-rata > 130% dari rata-rata 20D → volume diam-diam naik |
+| +1 | Vol Trend Ratio ≥ 1.1 | Volume mulai sedikit di atas rata-rata |
+| +1 | Price Tightness < 3% | Harga bergerak sangat sempit = akumulasi terselubung |
+| +1 | MFI Change > 0 | Uang mulai masuk walau sedikit |
+| +1 | ADX Rising | Momentum mulai tumbuh |
+| +1 | ADX Bullish | DI+ > DI- |
+| +1 | Free Float < 15% | Float kecil = lebih explosive saat naik |
+| -2 | Bearish Divergence | Sinyal peringatan |
+| -1 | RSI > 70 | Sudah overbought, terlambat |
+| -1 | Below MA20 | Struktur harga bearish |
+
+**Interpretasi:**
+- **8–10** 🔴 Sinyal sangat kuat — pantau harian, siapkan beli saat ada candle konfirmasi + volume spike
+- **6–7** 🟠 Kandidat serius — masukkan watchlist, alert di harga resistance terdekat
+- **4–5** 🟡 Ada potensi tapi masih sangat awal — pantau mingguan
+- **0–3** Belum menarik
+
+**Tips konfirmasi entry:**
+Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + volume 2x rata-rata, atau breakout dari range sideways dengan volume besar.
+""")
+                else:
+                    st.info(
+                        "Tidak ada kandidat Silent Accumulation hari ini. "
+                        "Coba turunkan 'Min Silent Accumulation Score' atau 'Min Avg Vol untuk Silent' di sidebar."
+                    )
+
+        # ═══════════════════════════════════════
+        # TAB 4: SEMUA HASIL ANALISA
+        # ═══════════════════════════════════════
+        with tab4:
             st.subheader("🔍 Seluruh Hasil Analisa")
 
             # Sort option
             sort_col = st.selectbox(
                 "Urutkan berdasarkan:",
-                options=['Early Momentum Score', 'MFI Change 5D', 'MFI (14D)', 'Rel Vol (20D)', 'ADX (14)'],
+                options=['Early Momentum Score', 'Silent Score', 'MFI Change 5D', 'MFI (14D)', 'Rel Vol (20D)', 'ADX (14)'],
                 index=0
             )
             df_sorted = (df_res_filtered.sort_values(sort_col, ascending=False)
-                         if not df_res_filtered.empty else df_res_filtered)
+                         if not df_res_filtered.empty and sort_col in df_res_filtered.columns
+                         else df_res_filtered)
 
             if not df_sorted.empty:
                 cols_all = [c for c in all_display_cols if c in df_sorted.columns]
@@ -1110,7 +1548,8 @@ if st.session_state.analisa_hasil is not None:
                     apply_full_style(
                         df_sorted[cols_all].style,
                         include_score=show_score_in_table,
-                        include_watch=True
+                        include_watch=True,
+                        include_silent=True,
                     ),
                     use_container_width=True,
                     height=500
@@ -1124,7 +1563,7 @@ if st.session_state.analisa_hasil is not None:
                     if st.session_state.tv_ticker in ticker_list_all else 0
                 selected_tv_all = st.selectbox(
                     "🔍 Pilih saham untuk chart:", ticker_list_all,
-                    index=default_idx_all, key="tv_select_tab3"
+                    index=default_idx_all, key="tv_select_tab4"
                 )
                 if selected_tv_all:
                     st.session_state.tv_ticker = selected_tv_all
@@ -1156,8 +1595,9 @@ if st.session_state.analisa_hasil is not None:
         }
 
         if not df_res.empty:
-            # Prioritaskan shortlist + prebreakout di dropdown
+            # Prioritaskan shortlist + prebreakout + silent di dropdown AI
             priority       = shortlist + [k for k in prebreakout_list if k not in shortlist]
+            priority      += [k for k in silent_list if k not in priority]
             rest           = [k for k in sorted(df_res['Kode Saham'].tolist()) if k not in priority]
             ticker_options = priority + rest
 
@@ -1224,16 +1664,29 @@ if st.session_state.analisa_hasil is not None:
         # ── Download ──
         df_s_dl    = df_res[df_res['Kode Saham'].isin(shortlist)] if not df_res.empty else pd.DataFrame()
         df_w_dl    = df_res[df_res['Kode Saham'].isin(prebreakout_list)] if not df_res.empty else pd.DataFrame()
-        excel_data = to_excel_report(df_s_dl, df_w_dl, df_res_filtered)
+        df_si_dl   = df_res[df_res['Kode Saham'].isin(silent_list)] if not df_res.empty else pd.DataFrame()
+
+        def to_excel_report_v18(df_short, df_watch, df_silent, df_all):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_short.to_excel(writer, index=False, sheet_name='Shortlist')
+                if not df_watch.empty:
+                    df_watch.to_excel(writer, index=False, sheet_name='Pre-Breakout Watch')
+                if not df_silent.empty:
+                    df_silent.to_excel(writer, index=False, sheet_name='Silent Accumulation')
+                df_all.to_excel(writer, index=False, sheet_name='Semua Analisa')
+            return output.getvalue()
+
+        excel_data = to_excel_report_v18(df_s_dl, df_w_dl, df_si_dl, df_res_filtered)
         st.sidebar.download_button(
-            label="📥 Download Report Excel v17",
+            label="📥 Download Report Excel v18",
             data=excel_data,
-            file_name=f"Analisa_BEI_{date.today()}_v17.xlsx",
+            file_name=f"Analisa_BEI_{date.today()}_v18.xlsx",
             mime="application/vnd.ms-excel"
         )
 
         # ── Legenda ──
-        with st.expander("📖 Legenda Indikator v16"):
+        with st.expander("📖 Legenda Indikator v18"):
             st.markdown("""
 | Kolom | Penjelasan |
 |---|---|
@@ -1250,14 +1703,22 @@ if st.session_state.analisa_hasil is not None:
 | **Rel Vol (20D)** | Volume hari ini vs rata-rata 20 hari |
 | **Rel Vol (50D)** | Volume hari ini vs rata-rata 50 hari |
 | **Chart Analysis** | `Overextended 🚨` · `Breakout Valid 🚀` · `Pullback Healthy 👍` · `Uptrend Normal` · `Downtrend ❌` · `Sideways` |
-| **Early Momentum Score** 🆕 | Skor 0–10 sinyal awal: MFI Change + ADX Rising + MA20 + RSI + Float. ≥6 = menarik, ≥8 = kuat |
-| **Pre-Breakout Watch** 🆕 | `🔭 Watch` = saham dengan sinyal akumulasi awal tapi belum breakout. Pantau 1–3 hari ke depan |
+| **Early Momentum Score** | Skor 0–10 sinyal awal: MFI Change + ADX Rising + MA20 + RSI + Float. ≥6 = menarik |
+| **Pre-Breakout Watch** | `🔭 Watch` = sinyal akumulasi awal tapi belum breakout. Pantau 1–3 hari ke depan |
+| **Silent Score** 🆕 | Skor 0–10 deteksi akumulasi diam-diam: BB Squeeze + OBV + Vol Trend. ≥6 = kandidat |
+| **BB Squeeze** 🆕 | `SQUEEZE 🔥` = BB sangat sempit (10% tersempit 50 hari). Energi terkompresi, siap meledak |
+| **OBV Trend** 🆕 | Tren On-Balance Volume. `Rising ↑` = akumulasi tersembunyi terdeteksi |
+| **Vol Trend Ratio** 🆕 | Rata-rata volume 5D / rata-rata 20D. > 1.2 = volume mulai diam-diam naik |
+| **Price Tightness (%)** 🆕 | Koefisien variasi harga 10 hari. < 3% = harga sideways sangat ketat = akumulasi |
+| **Silent Accum** 🆕 | `🕵️ Silent` = kandidat Silent Accumulation (pola pre-KOTA) |
 """)
 
 else:
     st.info(
         f"📂 Database: **{loaded_file}**\n\n"
-        "**Perubahan utama v17:**\n"
-        "- 🆕 **TradingView Widget**: klik nama saham di tiap tab → chart TradingView (candlestick + RSI + MFI + ADX) muncul langsung di dashboard\n"
-        "- ✅ Semua fitur v16 dipertahankan (Opsi A Pre-Breakout, Opsi C Early Momentum Score, AI Chart Analysis, dll)"
+        "**Perubahan utama v18:**\n"
+        "- 🆕 **Silent Accumulation Radar**: Tab baru untuk menangkap saham seperti KOTA sebelum terbang\n"
+        "- 🆕 Filter volume terpisah (lebih rendah) untuk saham low-cap yang diakumulasi diam-diam\n"
+        "- 🆕 Indikator baru: BB Squeeze, OBV Trend, Vol Trend Ratio, Price Tightness\n"
+        "- ✅ Semua fitur v17 dipertahankan (Shortlist, Pre-Breakout Watch, TradingView Widget, AI Chart Analysis)"
     )
