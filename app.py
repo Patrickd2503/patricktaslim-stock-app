@@ -1099,6 +1099,9 @@ end_d   = st.sidebar.date_input("Tanggal Akhir", today)
 
 st.sidebar.markdown("---")
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True, type="primary")
+if st.sidebar.button("🗑️ Clear Cache", use_container_width=True):
+    st.cache_data.clear()
+    st.sidebar.success("Cache berhasil dibersihkan! Silakan klik JALANKAN ANALISA ulang.")
 
 # ─────────────────────────────────────────────
 # 8. FORMAT & STYLE
