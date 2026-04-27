@@ -613,6 +613,96 @@ def is_silent_accumulation_candidate(
     return has_key_signal
 
 # ─────────────────────────────────────────────
+# 5e. COMPOSITE EXPLOSIVE RANK
+# ─────────────────────────────────────────────
+def compute_composite_rank(
+    last_adx: float,
+    adx_trend: str,
+    price_tightness: float,
+    vol_trend_ratio: float,
+    free_float: float,
+    early_score: int,
+    silent_score: int,
+    dist_20high: float,
+    obv_trend: str,
+    has_bearish_div: bool,
+) -> tuple[int, list[str]]:
+    """
+    Composite Explosive Rank (0–10): mendeteksi saham dengan energi terkompresi
+    sebelum breakout. Menggabungkan kekuatan tren, akumulasi tersembunyi, dan
+    potensi explosive move.
+
+    Komponen:
+      +2  ADX > 50 + ADX Trend Rising  (tren sangat kuat — anomali untuk sideways)
+      +1  ADX > 25 + ADX Trend Rising  (tren moderat-kuat)
+      +2  Price Tightness < 3%         (harga sangat ketat = konsolidasi/akumulasi)
+      +1  Price Tightness < 5%         (harga relatif ketat)
+      +2  Vol Trend Ratio > 2.0        (volume diam-diam naik signifikan)
+      +1  Vol Trend Ratio > 1.3        (volume mulai naik)
+      +2  Free Float < 20%             (float kecil = explosive potential)
+      +1  Free Float < 35%             (float sedang-kecil)
+      +1  OBV Rising                   (konfirmasi uang masuk dari OBV)
+      +1  Dist to 20D High > -5%       (sangat dekat resistance, tinggal sedikit trigger)
+      -2  Bearish Divergence           (sinyal pembalikan)
+    """
+    score = 0
+    criteria = []
+
+    if last_adx > 50 and adx_trend == "Rising":
+        score += 2
+        criteria.append(f"ADX {last_adx:.0f} Very Strong+Rising")
+    elif last_adx > 25 and adx_trend == "Rising":
+        score += 1
+        criteria.append(f"ADX {last_adx:.0f} Rising")
+
+    if price_tightness < 3.0:
+        score += 2
+        criteria.append(f"Tightness {price_tightness:.1f}% (sangat ketat)")
+    elif price_tightness < 5.0:
+        score += 1
+        criteria.append(f"Tightness {price_tightness:.1f}%")
+
+    if vol_trend_ratio > 2.0:
+        score += 2
+        criteria.append(f"Vol Trend {vol_trend_ratio:.2f}x (akumulasi kuat)")
+    elif vol_trend_ratio > 1.3:
+        score += 1
+        criteria.append(f"Vol Trend {vol_trend_ratio:.2f}x")
+
+    if 0 < free_float < 20:
+        score += 2
+        criteria.append(f"Float {free_float:.1f}% (kecil)")
+    elif free_float < 35:
+        score += 1
+        criteria.append(f"Float {free_float:.1f}%")
+
+    if obv_trend == "Rising ↑":
+        score += 1
+        criteria.append("OBV Rising")
+
+    if dist_20high >= -5.0:
+        score += 1
+        criteria.append(f"Dekat Resistance ({dist_20high:.1f}%)")
+
+    if has_bearish_div:
+        score -= 2
+        criteria.append("⚠️ Bearish Div (-2)")
+
+    final_score = max(0, min(score, 10))
+    return final_score, criteria
+
+def style_composite_rank(val):
+    """Styling untuk Composite Explosive Rank"""
+    try:
+        num = float(val)
+        if num >= 8: return 'background-color: #185FA5; color: white; font-weight: bold'
+        if num >= 6: return 'background-color: #378ADD; color: white; font-weight: bold'
+        if num >= 4: return 'background-color: #B5D4F4; color: #042C53; font-weight: bold'
+    except:
+        pass
+    return ''
+
+# ─────────────────────────────────────────────
 # 6. FUNGSI ANALISA UTAMA v16
 # ─────────────────────────────────────────────
 def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
@@ -775,6 +865,20 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
             is_above_ma20   = is_above_ma20,
         )
 
+        # ── COMPOSITE EXPLOSIVE RANK ──
+        comp_rank, comp_criteria = compute_composite_rank(
+            last_adx        = last_adx,
+            adx_trend       = adx_trend,
+            price_tightness = price_tightness,
+            vol_trend_ratio = vol_trend_ratio,
+            free_float      = free_float,
+            early_score     = early_score,
+            silent_score    = silent_score,
+            dist_20high     = dist_20high,
+            obv_trend       = obv_trend_label,
+            has_bearish_div = has_bearish_div,
+        )
+
         # ── REASONS ──
         reasons = []
         if rel_vol >= 2.0 and p_change_today > 1.0:
@@ -880,6 +984,8 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
             'Price Tightness (%)':   price_tightness,
             'Silent Score':          silent_score,
             'Silent Accum':          '🕵️ Silent' if is_silent else '',
+            'Composite Rank':        comp_rank,
+            'Composite Criteria':    " | ".join(comp_criteria),
             'Shortlist Reasons':     ", ".join(reasons) if reasons else "",
             'Chart Analysis':        chart_analysis,
         })
@@ -1092,6 +1198,9 @@ min_early_score = st.sidebar.slider(
     "Min Early Momentum Score untuk Watch", min_value=0, max_value=10, value=5,
     help="Skor ≥ 6 = kandidat kuat. Skor ≥ 8 = potensi explosive (tapi berisiko)")
 show_score_in_table = st.sidebar.checkbox("Tampilkan kolom Early Momentum Score", value=True)
+show_composite_rank = st.sidebar.checkbox("Tampilkan Composite Explosive Rank", value=True,
+    help="Skor 0–10 gabungan: ADX kuat + harga ketat + volume naik diam-diam + float kecil. "
+         "≥8 = prioritas tertinggi untuk entry sebelum breakout.")
 
 today   = date.today()
 start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=30))
@@ -1141,6 +1250,8 @@ def apply_full_style(df_styled, include_score=True, include_watch=False, include
             styled = styled.map(style_bb_squeeze, subset=['BB Squeeze'])
         if 'OBV Trend' in df_styled.data.columns:
             styled = styled.map(style_obv_trend, subset=['OBV Trend'])
+    if 'Composite Rank' in df_styled.data.columns:
+        styled = styled.map(style_composite_rank, subset=['Composite Rank'])
     return styled
 
 # ─────────────────────────────────────────────
@@ -1225,12 +1336,22 @@ if st.session_state.analisa_hasil is not None:
             'Dist to 20D High (%)', 'Last Price', 'Rel Vol (20D)', 'Rel Vol (50D)',
             'Consec Up Days', 'AvgVol20 (Lot)',
         ]
-        score_col   = ['Early Momentum Score'] if show_score_in_table else []
-        watch_col   = ['Pre-Breakout Watch']
-        silent_col  = ['Silent Score', 'BB Squeeze', 'OBV Trend', 'Vol Trend Ratio', 'Silent Accum']
-        reason_col  = ['Shortlist Reasons', 'Chart Analysis']
+        score_col      = ['Early Momentum Score'] if show_score_in_table else []
+        comp_rank_col  = ['Composite Rank', 'Composite Criteria'] if show_composite_rank else []
+        watch_col      = ['Pre-Breakout Watch']
+        silent_col     = ['Silent Score', 'BB Squeeze', 'OBV Trend', 'Vol Trend Ratio', 'Silent Accum']
+        reason_col     = ['Shortlist Reasons', 'Chart Analysis']
 
-        all_display_cols = base_cols + score_col + watch_col + silent_col + reason_col
+        all_display_cols = base_cols + score_col + comp_rank_col + watch_col + silent_col + reason_col
+
+        # Sort default: Composite Rank DESC, lalu Early Momentum Score DESC
+        sort_cols = []
+        if show_composite_rank and 'Composite Rank' in df_res.columns:
+            sort_cols.append('Composite Rank')
+        if show_score_in_table and 'Early Momentum Score' in df_res.columns:
+            sort_cols.append('Early Momentum Score')
+        if sort_cols:
+            df_res_filtered = df_res_filtered.sort_values(sort_cols, ascending=False)
 
         # ── TAB LAYOUT ──
         tab1, tab2, tab3, tab4 = st.tabs([
@@ -1249,7 +1370,7 @@ if st.session_state.analisa_hasil is not None:
                     if not df_res_filtered.empty else pd.DataFrame())
 
             if not df_s.empty:
-                cols_s = [c for c in base_cols + score_col + reason_col if c in df_s.columns]
+                cols_s = [c for c in base_cols + score_col + comp_rank_col + reason_col if c in df_s.columns]
                 st.dataframe(
                     apply_full_style(df_s[cols_s].style, include_score=show_score_in_table),
                     use_container_width=True
@@ -1312,13 +1433,15 @@ if st.session_state.analisa_hasil is not None:
                         (df_watch_raw['Free Float (%)'] <= max_ff)
                     )
                     df_watch = df_watch_raw[watch_mask].copy()
-                    # Sort by Early Momentum Score descending
-                    df_watch = df_watch.sort_values('Early Momentum Score', ascending=False)
+                    # Sort by Composite Rank + Early Momentum Score descending
+                    sort_w = [c for c in ['Composite Rank', 'Early Momentum Score'] if c in df_watch.columns]
+                    if sort_w:
+                        df_watch = df_watch.sort_values(sort_w, ascending=False)
                 else:
                     df_watch = pd.DataFrame()
 
                 if not df_watch.empty:
-                    cols_w = [c for c in base_cols + score_col + reason_col if c in df_watch.columns]
+                    cols_w = [c for c in base_cols + score_col + comp_rank_col + reason_col if c in df_watch.columns]
                     st.dataframe(
                         apply_full_style(
                             df_watch[cols_w].style,
@@ -1344,16 +1467,18 @@ if st.session_state.analisa_hasil is not None:
                     st.markdown("#### 📋 Ringkasan Pre-Breakout Candidates")
                     for _, row in df_watch.iterrows():
                         sc = int(row['Early Momentum Score'])
+                        cr = int(row['Composite Rank']) if 'Composite Rank' in row else 0
                         score_badge = "🟠" if sc >= 6 else "🟡"
                         ff_note = " ⚡Float kecil!" if row['Free Float (%)'] < 15 else ""
+                        cr_note = f" | 🔵 Comp Rank: **{cr}**/10" if show_composite_rank else ""
                         st.markdown(
                             f"{score_badge} **{row['Kode Saham']}** | "
                             f"Harga: Rp {row['Last Price']:,} | "
                             f"MFI Change: **{row['MFI Change 5D']:+.1f}** | "
-                            f"ADX Trend: {row['ADX Trend']} | "
+                            f"ADX: {row['ADX (14)']:.0f} ({row['ADX Trend']}) | "
                             f"Consec Up: {row['Consec Up Days']} hari | "
                             f"Rel Vol: {row['Rel Vol (20D)']:.2f}x | "
-                            f"Score: **{sc}**/10{ff_note}"
+                            f"Score: **{sc}**/10{cr_note}{ff_note}"
                         )
 
                     # ── Penjelasan Early Momentum Score breakdown ──
@@ -1417,7 +1542,7 @@ if st.session_state.analisa_hasil is not None:
                     # Kolom khusus silent accumulation
                     silent_cols = [
                         'Kode Saham', 'Last Price', 'Free Float (%)', 'AvgVol20 (Lot)',
-                        'Silent Score', 'BB Squeeze', 'BB Width (%)', 'OBV Trend',
+                        'Composite Rank', 'Silent Score', 'BB Squeeze', 'BB Width (%)', 'OBV Trend',
                         'Vol Trend Ratio', 'Price Tightness (%)',
                         'MFI (14D)', 'MFI Change 5D', 'RSI (14)',
                         'ADX (14)', 'ADX Direction', 'ADX Trend',
@@ -1451,6 +1576,8 @@ if st.session_state.analisa_hasil is not None:
                                 'Rel Vol (20D)':        '{:.2f}x',
                             }, na_rep="-")
                         )
+                        if 'Composite Rank' in df_styled.data.columns and show_composite_rank:
+                            styled = styled.map(style_composite_rank, subset=['Composite Rank'])
                         return styled
 
                     st.dataframe(
@@ -1536,9 +1663,10 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
             st.subheader("🔍 Seluruh Hasil Analisa")
 
             # Sort option
+            sort_options = ['Composite Rank', 'Early Momentum Score', 'Silent Score', 'MFI Change 5D', 'MFI (14D)', 'Rel Vol (20D)', 'ADX (14)']
             sort_col = st.selectbox(
                 "Urutkan berdasarkan:",
-                options=['Early Momentum Score', 'Silent Score', 'MFI Change 5D', 'MFI (14D)', 'Rel Vol (20D)', 'ADX (14)'],
+                options=sort_options,
                 index=0
             )
             df_sorted = (df_res_filtered.sort_values(sort_col, ascending=False)
@@ -1714,6 +1842,8 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
 | **Vol Trend Ratio** 🆕 | Rata-rata volume 5D / rata-rata 20D. > 1.2 = volume mulai diam-diam naik |
 | **Price Tightness (%)** 🆕 | Koefisien variasi harga 10 hari. < 3% = harga sideways sangat ketat = akumulasi |
 | **Silent Accum** 🆕 | `🕵️ Silent` = kandidat Silent Accumulation (pola pre-KOTA) |
+| **Composite Rank** 🆕 | Skor 0–10 gabungan untuk prioritas entry: ADX kuat (>50) + Tightness <3% + Vol Trend >2x + Float <20% + OBV Rising + Dekat Resistance. **≥8 = prioritas tertinggi**. Warna biru makin gelap = makin kuat |
+| **Composite Criteria** 🆕 | Detail kriteria yang terpenuhi untuk Composite Rank masing-masing saham |
 """)
 
 else:
