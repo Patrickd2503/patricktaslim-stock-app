@@ -1545,32 +1545,34 @@ FORMAT_DICT = {
 }
 
 def apply_full_style(df_styled, include_score=True, include_watch=False, include_silent=False):
-    styled = (df_styled
-              .map(style_mfi,           subset=['MFI (14D)'])
-              .map(style_market_rs,     subset=['Market RS'])
-              .map(style_pva,           subset=['PVA'])
-              .map(style_ma_filter,     subset=['Above MA20'])
-              .map(style_rel_vol,       subset=['Rel Vol (20D)'])
-              .map(style_adx,           subset=['ADX (14)'])
-              .map(style_divergence,    subset=['Divergence Warning'])
-              .map(style_adx_trend,     subset=['ADX Trend'])
-              .map(style_adx_dir,       subset=['ADX Direction'])
-              .map(style_chart_analysis,subset=['Chart Analysis'])
-              .map(style_visual_chart,  subset=['Visual Chart Analysis'])
-              .format(FORMAT_DICT, na_rep="-"))
-    if include_score and 'Early Momentum Score' in df_styled.data.columns:
-        styled = styled.map(style_early_momentum, subset=['Early Momentum Score'])
-    if include_watch and 'Pre-Breakout Watch' in df_styled.data.columns:
-        styled = styled.map(style_prebreakout, subset=['Pre-Breakout Watch'])
+    cols = df_styled.data.columns.tolist()
+
+    def _map(style_fn, col):
+        nonlocal styled
+        if col in cols:
+            styled = styled.map(style_fn, subset=[col])
+
+    styled = df_styled.format(FORMAT_DICT, na_rep="-")
+    _map(style_mfi,            'MFI (14D)')
+    _map(style_market_rs,      'Market RS')
+    _map(style_pva,            'PVA')
+    _map(style_ma_filter,      'Above MA20')
+    _map(style_rel_vol,        'Rel Vol (20D)')
+    _map(style_adx,            'ADX (14)')
+    _map(style_divergence,     'Divergence Warning')
+    _map(style_adx_trend,      'ADX Trend')
+    _map(style_adx_dir,        'ADX Direction')
+    _map(style_chart_analysis, 'Chart Analysis')
+    _map(style_visual_chart,   'Visual Chart Analysis')
+    if include_score:
+        _map(style_early_momentum, 'Early Momentum Score')
+    if include_watch:
+        _map(style_prebreakout, 'Pre-Breakout Watch')
     if include_silent:
-        if 'Silent Score' in df_styled.data.columns:
-            styled = styled.map(style_silent_score, subset=['Silent Score'])
-        if 'BB Squeeze' in df_styled.data.columns:
-            styled = styled.map(style_bb_squeeze, subset=['BB Squeeze'])
-        if 'OBV Trend' in df_styled.data.columns:
-            styled = styled.map(style_obv_trend, subset=['OBV Trend'])
-    if 'Composite Rank' in df_styled.data.columns:
-        styled = styled.map(style_composite_rank, subset=['Composite Rank'])
+        _map(style_silent_score, 'Silent Score')
+        _map(style_bb_squeeze,   'BB Squeeze')
+        _map(style_obv_trend,    'OBV Trend')
+    _map(style_composite_rank, 'Composite Rank')
     return styled
 
 # ─────────────────────────────────────────────
