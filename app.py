@@ -36,9 +36,9 @@ st.markdown("""
 # 1. CACHE DATA
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=3600)
-def fetch_yf_all_data(tickers, start_date, end_date):
+def fetch_yf_all_data(tickers, end_date):
     all_tickers = list(tickers) + ["^JKSE"]
-    extended_start = start_date - timedelta(days=500)
+    extended_start = end_date - timedelta(days=120)
     try:
         df = yf.download(all_tickers, start=extended_start, end=end_date,
                          threads=True, progress=False)
@@ -1202,9 +1202,9 @@ show_composite_rank = st.sidebar.checkbox("Tampilkan Composite Explosive Rank", 
     help="Skor 0–10 gabungan: ADX kuat + harga ketat + volume naik diam-diam + float kecil. "
          "≥8 = prioritas tertinggi untuk entry sebelum breakout.")
 
-today   = date.today()
-start_d = st.sidebar.date_input("Tanggal Mulai", today - timedelta(days=30))
-end_d   = st.sidebar.date_input("Tanggal Akhir", today)
+today = date.today()
+end_d = st.sidebar.date_input("📅 Analisa per tanggal", today)
+st.sidebar.caption("ℹ️ Data historis otomatis diambil 120 hari ke belakang untuk keakuratan indikator.")
 
 st.sidebar.markdown("---")
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True, type="primary")
@@ -1268,7 +1268,7 @@ if btn_analisa:
     with st.spinner('Menganalisa market…'):
         active_list = selected_tickers if selected_tickers else target_list
         tickers_jk  = [k + ".JK" for k in active_list]
-        df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), start_d, end_d)
+        df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), end_d)
 
         if not df_c.empty:
             df_res, shortlist, prebreakout_list, silent_list = get_signals_and_data(
