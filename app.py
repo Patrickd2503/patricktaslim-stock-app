@@ -10,6 +10,8 @@ import pandas_ta as pta
 import requests
 import base64
 import json
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ─────────────────────────────────────────────
 # SETUP (jalankan sekali sebelum app pertama kali):
@@ -18,18 +20,17 @@ import json
 # ─────────────────────────────────────────────
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI v18", layout="wide")
-st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v18 – Silent Accumulation Radar")
+st.set_page_config(page_title="Monitor Saham BEI v19", layout="wide")
+st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v19 – Visual Chart Analysis")
 
 st.markdown("""
-**Update v18:**
-- ✅ Semua fitur v17 dipertahankan (Shortlist, Pre-Breakout Watch, Early Momentum Score, TradingView Widget, AI Chart Analysis)
-- 🆕 **Tab 4: Silent Accumulation Radar** — mendeteksi saham seperti KOTA *sebelum* terbang:
-  - Volume rendah tapi mulai naik (lolos filter vol absolut yang terlalu ketat)
-  - Harga sideways konsolidasi tapi MFI / OBV mulai menanjak diam-diam
-  - Bollinger Band menyempit (squeeze) → potensi explosive move
-  - Body candle konsisten kecil tapi arah naik (akumulasi terselubung)
-- 🆕 **Filter volume terpisah** untuk Silent Accumulation (lebih rendah dari filter utama)
+**Update v19:**
+- ✅ Semua fitur v18 dipertahankan (Shortlist, Pre-Breakout Watch, Silent Accumulation Radar, AI Chart Analysis)
+- 🆕 **Kolom Visual Chart Analysis (B1)** — rule-based pattern detection otomatis:
+  - Support/Resistance (pivot high/low N hari), Candlestick Pattern (Doji, Hammer, Bullish/Bearish Engulfing)
+  - Volume Climax (spike > 3x rata-rata), Trendline Slope (linear regression harga)
+  - Dekat Resistance (jarak ke high 20/50 hari), Consolidation Breakout (harga keluar dari range sempit)
+- 🆕 **Plotly Candlestick Chart Interaktif (B2)** — klik saham di tabel → tampil chart OHLCV + MA + Volume
 """)
 
 # ─────────────────────────────────────────────
@@ -43,14 +44,14 @@ def fetch_yf_all_data(tickers, end_date):
         df = yf.download(all_tickers, start=extended_start, end=end_date,
                          threads=True, progress=False)
         if df.empty:
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex):
-            return df['Close'], df['Volume'], df['High'], df['Low']
+            return df['Close'], df['Volume'], df['High'], df['Low'], df['Open']
         else:
-            return df[['Close']], df[['Volume']], df[['High']], df[['Low']]
+            return df[['Close']], df[['Volume']], df[['High']], df[['Low']], df[['Open']]
     except Exception as e:
         st.error(f"Error download data: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 # ─────────────────────────────────────────────
 # 2. LOAD DATABASE EMITEN
@@ -703,9 +704,318 @@ def style_composite_rank(val):
     return ''
 
 # ─────────────────────────────────────────────
+# 5f. VISUAL CHART ANALYSIS — B1 (Rule-Based)
+# ─────────────────────────────────────────────
+
+def detect_candlestick_pattern(open_s: pd.Series, high_s: pd.Series,
+                                low_s: pd.Series, close_s: pd.Series) -> str:
+    """
+    Deteksi pola candlestick dari OHLC terakhir.
+    Returns: label pola atau '' jika tidak ada pola terdeteksi.
+    """
+    if len(close_s) < 2:
+        return ""
+    o, h, l, c = float(open_s.iloc[-1]), float(high_s.iloc[-1]), float(low_s.iloc[-1]), float(close_s.iloc[-1])
+    o2, c2 = float(open_s.iloc[-2]), float(close_s.iloc[-2])
+    body = abs(c - o)
+    candle_range = h - l if h > l else 1
+    body_pct = body / candle_range
+
+    # Doji: body sangat kecil
+    if body_pct < 0.1:
+        return "Doji"
+
+    # Hammer: lower shadow panjang, body kecil di atas, sedikit upper shadow
+    lower_shadow = min(o, c) - l
+    upper_shadow = h - max(o, c)
+    if lower_shadow >= 2 * body and upper_shadow < body and c > l:
+        return "Hammer 🔨" if c >= o else "Hanging Man"
+
+    # Bullish Engulfing: candle sebelumnya bearish, sekarang bullish dan body lebih besar
+    if c > o and c2 < o2 and c > o2 and o < c2:
+        return "Bullish Engulfing 🟢"
+
+    # Bearish Engulfing: candle sebelumnya bullish, sekarang bearish dan body lebih besar
+    if c < o and c2 > o2 and c < o2 and o > c2:
+        return "Bearish Engulfing 🔴"
+
+    # Shooting Star: upper shadow panjang, body kecil di bawah
+    if upper_shadow >= 2 * body and lower_shadow < body and c < h:
+        return "Shooting Star ⭐"
+
+    return ""
+
+
+def compute_support_resistance(high_s: pd.Series, low_s: pd.Series,
+                                close_s: pd.Series, n: int = 20) -> dict:
+    """
+    Hitung support/resistance sederhana dari pivot high/low dalam N hari terakhir.
+    Returns dict: {resistance, support, dist_to_resistance_pct, dist_to_support_pct}
+    """
+    if len(high_s) < n:
+        return {"resistance": None, "support": None, "dist_resistance_pct": 0.0, "dist_support_pct": 0.0}
+    h_tail = high_s.tail(n)
+    l_tail = low_s.tail(n)
+    resistance = float(h_tail.max())
+    support    = float(l_tail.min())
+    last_price = float(close_s.iloc[-1])
+    dist_r = ((resistance - last_price) / last_price * 100) if last_price > 0 else 0.0
+    dist_s = ((last_price - support) / last_price * 100) if last_price > 0 else 0.0
+    return {
+        "resistance": resistance,
+        "support": support,
+        "dist_resistance_pct": round(dist_r, 2),
+        "dist_support_pct":    round(dist_s, 2),
+    }
+
+
+def compute_trendline_slope(close_s: pd.Series, n: int = 20) -> str:
+    """
+    Hitung slope linear regression harga dalam N hari terakhir.
+    Returns: 'Up ↗', 'Down ↘', atau 'Flat →'
+    """
+    if len(close_s) < n:
+        return "Flat →"
+    tail = close_s.tail(n).values
+    x    = np.arange(len(tail))
+    slope = np.polyfit(x, tail, 1)[0]
+    avg_price = tail.mean()
+    slope_pct = (slope / avg_price) * 100 if avg_price > 0 else 0
+    if slope_pct > 0.3:
+        return "Up ↗"
+    elif slope_pct < -0.3:
+        return "Down ↘"
+    return "Flat →"
+
+
+def detect_volume_climax(volume_s: pd.Series, n: int = 20, threshold: float = 3.0) -> bool:
+    """
+    Deteksi volume climax: hari ini > threshold × rata-rata N hari.
+    """
+    if len(volume_s) < n + 1:
+        return False
+    avg = float(volume_s.iloc[-(n+1):-1].mean())
+    today_vol = float(volume_s.iloc[-1])
+    return (today_vol > threshold * avg) if avg > 0 else False
+
+
+def detect_consolidation_breakout(close_s: pd.Series, n: int = 10, tight_pct: float = 3.0) -> bool:
+    """
+    Deteksi consolidation breakout: harga keluar dari range sempit N hari lalu.
+    Syarat: CV harga N-1 hari sebelumnya < tight_pct, dan hari ini close > max range tsb.
+    """
+    if len(close_s) < n + 2:
+        return False
+    prev_range = close_s.iloc[-(n+1):-1]
+    cv = (prev_range.std() / prev_range.mean() * 100) if prev_range.mean() > 0 else 100
+    if cv > tight_pct:
+        return False
+    prev_high = float(prev_range.max())
+    today = float(close_s.iloc[-1])
+    return today > prev_high
+
+
+def compute_visual_chart_analysis(
+    open_s: pd.Series, high_s: pd.Series, low_s: pd.Series,
+    close_s: pd.Series, volume_s: pd.Series,
+) -> str:
+    """
+    Kombinasi semua rule-based visual analysis → satu string ringkasan singkat.
+    """
+    signals = []
+
+    # 1. Candlestick pattern
+    candle = detect_candlestick_pattern(open_s, high_s, low_s, close_s)
+    if candle:
+        signals.append(candle)
+
+    # 2. Volume climax
+    if detect_volume_climax(volume_s, n=20, threshold=3.0):
+        signals.append("Vol Climax 💥")
+
+    # 3. Consolidation breakout
+    if detect_consolidation_breakout(close_s, n=10, tight_pct=3.0):
+        signals.append("Consol Breakout 🚀")
+
+    # 4. Trendline slope
+    slope = compute_trendline_slope(close_s, n=20)
+    signals.append(f"Trend:{slope}")
+
+    # 5. Dekat resistance (< 2% dari high 20D)
+    sr = compute_support_resistance(high_s, low_s, close_s, n=20)
+    if sr["dist_resistance_pct"] <= 2.0 and sr["dist_resistance_pct"] >= 0:
+        signals.append(f"Dekat R({sr['dist_resistance_pct']:.1f}%)")
+    elif sr["dist_resistance_pct"] <= 5.0 and sr["dist_resistance_pct"] >= 0:
+        signals.append(f"Menuju R({sr['dist_resistance_pct']:.1f}%)")
+
+    return " | ".join(signals) if signals else "-"
+
+
+def style_visual_chart(val):
+    val = str(val)
+    if "Bullish Engulfing" in val or "Consol Breakout" in val:
+        return "background-color: rgba(0,180,0,0.18); color: #004d00; font-weight:bold"
+    if "Bearish Engulfing" in val or "Shooting Star" in val:
+        return "background-color: rgba(255,60,60,0.15); color: darkred;"
+    if "Vol Climax" in val:
+        return "background-color: rgba(255,165,0,0.25); color: #7a4000; font-weight:bold"
+    if "Hammer" in val:
+        return "background-color: rgba(100,200,100,0.2);"
+    return ""
+
+
+# ─────────────────────────────────────────────
+# 5g. PLOTLY CANDLESTICK CHART — B2
+# ─────────────────────────────────────────────
+
+@st.cache_data(ttl=1800)
+def fetch_ohlcv_for_plotly(ticker_jk: str, days: int = 90):
+    """Fetch OHLCV data untuk Plotly chart."""
+    try:
+        df = yf.download(ticker_jk, period=f"{days}d", progress=False, auto_adjust=True)
+        if df.empty:
+            return None
+        df.index = pd.to_datetime(df.index)
+        # Flatten MultiIndex columns jika ada
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df[['Open','High','Low','Close','Volume']].copy()
+        df['MA20'] = df['Close'].rolling(20).mean()
+        df['MA50'] = df['Close'].rolling(50).mean()
+        # Support & Resistance dari high/low 20D rolling
+        df['Resist20'] = df['High'].rolling(20).max()
+        df['Support20'] = df['Low'].rolling(20).min()
+        return df
+    except Exception as e:
+        return None
+
+
+def show_plotly_candlestick(ticker_code: str):
+    """
+    Tampilkan Plotly candlestick chart interaktif dengan MA, Volume, Support/Resistance.
+    """
+    ticker_jk = ticker_code + ".JK"
+    with st.spinner(f"Memuat chart Plotly untuk {ticker_code}…"):
+        df = fetch_ohlcv_for_plotly(ticker_jk)
+
+    if df is None or df.empty:
+        st.warning(f"Data OHLCV tidak tersedia untuk {ticker_code}.")
+        return
+
+    # Pastikan kolom dalam bentuk Series 1D (bukan DataFrame)
+    def _s(col):
+        s = df[col]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        return s
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.70, 0.30],
+        subplot_titles=[f"{ticker_code} – Candlestick + MA", "Volume"]
+    )
+
+    # ── Candlestick ──
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=_s('Open'), high=_s('High'),
+        low=_s('Low'),  close=_s('Close'),
+        name="OHLC",
+        increasing_line_color="#26a69a",
+        decreasing_line_color="#ef5350",
+    ), row=1, col=1)
+
+    # ── MA Lines ──
+    fig.add_trace(go.Scatter(
+        x=df.index, y=_s('MA20'),
+        name="MA20", line=dict(color="#FF9800", width=1.5),
+        opacity=0.85,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=_s('MA50'),
+        name="MA50", line=dict(color="#2196F3", width=1.5),
+        opacity=0.85,
+    ), row=1, col=1)
+
+    # ── Resistance & Support (20D rolling) ──
+    fig.add_trace(go.Scatter(
+        x=df.index, y=_s('Resist20'),
+        name="Resist 20D", line=dict(color="#ef5350", width=1, dash="dot"),
+        opacity=0.6,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=_s('Support20'),
+        name="Support 20D", line=dict(color="#26a69a", width=1, dash="dot"),
+        opacity=0.6,
+    ), row=1, col=1)
+
+    # ── Volume bar (color by price direction) ──
+    close_arr = _s('Close').values
+    open_arr  = _s('Open').values
+    vol_colors = ["#26a69a" if c >= o else "#ef5350" for c, o in zip(close_arr, open_arr)]
+    fig.add_trace(go.Bar(
+        x=df.index, y=_s('Volume'),
+        name="Volume", marker_color=vol_colors, opacity=0.75,
+    ), row=2, col=1)
+
+    # ── Volume MA20 ──
+    vol_ma = _s('Volume').rolling(20).mean()
+    fig.add_trace(go.Scatter(
+        x=df.index, y=vol_ma,
+        name="Vol MA20", line=dict(color="#FF9800", width=1.2),
+        opacity=0.8,
+    ), row=2, col=1)
+
+    fig.update_layout(
+        height=550,
+        xaxis_rangeslider_visible=False,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
+        margin=dict(l=30, r=20, t=40, b=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(248,249,250,1)",
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="#e0e0e0")
+    fig.update_yaxes(showgrid=True, gridcolor="#e0e0e0")
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Tambahan: ringkasan sinyal visual
+    c = df['Close']
+    h = df['High']
+    l = df['Low']
+    v = df['Volume']
+    o = df['Open']
+
+    def _col_series(col):
+        s = df[col]
+        return s.iloc[:,0] if isinstance(s, pd.DataFrame) else s
+
+    candle_pat = detect_candlestick_pattern(_col_series('Open'), _col_series('High'), _col_series('Low'), _col_series('Close'))
+    vol_climax  = detect_volume_climax(_col_series('Volume'))
+    consol_bo   = detect_consolidation_breakout(_col_series('Close'))
+    slope       = compute_trendline_slope(_col_series('Close'))
+    sr          = compute_support_resistance(_col_series('High'), _col_series('Low'), _col_series('Close'))
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Candlestick", candle_pat if candle_pat else "-")
+    col2.metric("Trendline", slope)
+    col3.metric("Vol Climax", "✅ Ya" if vol_climax else "—")
+    col4.metric("Consol Breakout", "✅ Ya" if consol_bo else "—")
+
+    c2a, c2b = st.columns(2)
+    if sr["resistance"]:
+        c2a.metric("Resistance 20D", f"Rp {sr['resistance']:,.0f}",
+                   f"{sr['dist_resistance_pct']:+.1f}% dari harga")
+        c2b.metric("Support 20D",    f"Rp {sr['support']:,.0f}",
+                   f"-{sr['dist_support_pct']:.1f}% dari harga")
+
+
+# ─────────────────────────────────────────────
 # 6. FUNGSI ANALISA UTAMA v16
 # ─────────────────────────────────────────────
-def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
+def get_signals_and_data(df_c, df_v, df_h, df_l, df_o, df_ref, min_vol_lot,
                           min_mfi_change_watch, min_early_score,
                           watch_require_outperform,
                           min_vol_silent_lot, min_silent_score):
@@ -729,6 +1039,8 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
         v = df_v[col].dropna()
         h = df_h[col].dropna()
         l = df_l[col].dropna()
+        # Open series (untuk candlestick pattern detection)
+        o_col = df_o[col].dropna() if col in df_o.columns else pd.Series(dtype=float)
 
         if len(c) < 55:
             continue
@@ -879,6 +1191,11 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
             has_bearish_div = has_bearish_div,
         )
 
+        # ── VISUAL CHART ANALYSIS (B1) ──
+        visual_analysis = compute_visual_chart_analysis(
+            open_s=o_col, high_s=h, low_s=l, close_s=c, volume_s=v
+        )
+
         # ── REASONS ──
         reasons = []
         if rel_vol >= 2.0 and p_change_today > 1.0:
@@ -988,6 +1305,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_ref, min_vol_lot,
             'Composite Criteria':    " | ".join(comp_criteria),
             'Shortlist Reasons':     ", ".join(reasons) if reasons else "",
             'Chart Analysis':        chart_analysis,
+            'Visual Chart Analysis': visual_analysis,
         })
 
     df_results = pd.DataFrame(results)
@@ -1238,6 +1556,7 @@ def apply_full_style(df_styled, include_score=True, include_watch=False, include
               .map(style_adx_trend,     subset=['ADX Trend'])
               .map(style_adx_dir,       subset=['ADX Direction'])
               .map(style_chart_analysis,subset=['Chart Analysis'])
+              .map(style_visual_chart,  subset=['Visual Chart Analysis'])
               .format(FORMAT_DICT, na_rep="-"))
     if include_score and 'Early Momentum Score' in df_styled.data.columns:
         styled = styled.map(style_early_momentum, subset=['Early Momentum Score'])
@@ -1268,11 +1587,11 @@ if btn_analisa:
     with st.spinner('Menganalisa market…'):
         active_list = selected_tickers if selected_tickers else target_list
         tickers_jk  = [k + ".JK" for k in active_list]
-        df_c, df_v, df_h, df_l = fetch_yf_all_data(tuple(tickers_jk), end_d)
+        df_c, df_v, df_h, df_l, df_o = fetch_yf_all_data(tuple(tickers_jk), end_d)
 
         if not df_c.empty:
             df_res, shortlist, prebreakout_list, silent_list = get_signals_and_data(
-                df_c, df_v, df_h, df_l, df_emiten, min_vol_lot,
+                df_c, df_v, df_h, df_l, df_o, df_emiten, min_vol_lot,
                 min_mfi_change_watch=min_mfi_change_watch,
                 min_early_score=min_early_score,
                 watch_require_outperform=watch_require_outperform,
@@ -1340,7 +1659,7 @@ if st.session_state.analisa_hasil is not None:
         comp_rank_col  = ['Composite Rank', 'Composite Criteria'] if show_composite_rank else []
         watch_col      = ['Pre-Breakout Watch']
         silent_col     = ['Silent Score', 'BB Squeeze', 'OBV Trend', 'Vol Trend Ratio', 'Silent Accum']
-        reason_col     = ['Shortlist Reasons', 'Chart Analysis']
+        reason_col     = ['Shortlist Reasons', 'Chart Analysis', 'Visual Chart Analysis']
 
         all_display_cols = base_cols + score_col + comp_rank_col + watch_col + silent_col + reason_col
 
@@ -1389,7 +1708,14 @@ if st.session_state.analisa_hasil is not None:
                 )
                 if selected_tv_s:
                     st.session_state.tv_ticker = selected_tv_s
-                    show_tradingview_widget(selected_tv_s)
+                    chart_mode_s = st.radio(
+                        "Mode Chart:", ["📊 Plotly Candlestick (Interaktif)", "📈 TradingView Widget"],
+                        key="chart_mode_tab1", horizontal=True
+                    )
+                    if "Plotly" in chart_mode_s:
+                        show_plotly_candlestick(selected_tv_s)
+                    else:
+                        show_tradingview_widget(selected_tv_s)
 
                 st.markdown("#### 📋 Ringkasan Kandidat Shortlist")
                 for _, row in df_s.iterrows():
@@ -1462,7 +1788,14 @@ if st.session_state.analisa_hasil is not None:
                     )
                     if selected_tv_w:
                         st.session_state.tv_ticker = selected_tv_w
-                        show_tradingview_widget(selected_tv_w)
+                        chart_mode_w = st.radio(
+                            "Mode Chart:", ["📊 Plotly Candlestick (Interaktif)", "📈 TradingView Widget"],
+                            key="chart_mode_tab2", horizontal=True
+                        )
+                        if "Plotly" in chart_mode_w:
+                            show_plotly_candlestick(selected_tv_w)
+                        else:
+                            show_tradingview_widget(selected_tv_w)
 
                     st.markdown("#### 📋 Ringkasan Pre-Breakout Candidates")
                     for _, row in df_watch.iterrows():
@@ -1547,7 +1880,7 @@ if st.session_state.analisa_hasil is not None:
                         'MFI (14D)', 'MFI Change 5D', 'RSI (14)',
                         'ADX (14)', 'ADX Direction', 'ADX Trend',
                         'Above MA20', 'Dist to 20D High (%)', 'Rel Vol (20D)',
-                        'Divergence Warning', 'Market RS', 'Chart Analysis',
+                        'Divergence Warning', 'Market RS', 'Chart Analysis', 'Visual Chart Analysis',
                     ]
                     cols_s = [c for c in silent_cols if c in df_silent.columns]
 
@@ -1563,6 +1896,7 @@ if st.session_state.analisa_hasil is not None:
                             .map(style_adx_dir,       subset=['ADX Direction'])
                             .map(style_divergence,    subset=['Divergence Warning'])
                             .map(style_chart_analysis,subset=['Chart Analysis'])
+                            .map(style_visual_chart,  subset=['Visual Chart Analysis'])
                             .format({
                                 'Free Float (%)':       '{:.1f}%',
                                 'MFI (14D)':            '{:.1f}',
@@ -1598,7 +1932,14 @@ if st.session_state.analisa_hasil is not None:
                     )
                     if selected_tv_si:
                         st.session_state.tv_ticker = selected_tv_si
-                        show_tradingview_widget(selected_tv_si)
+                        chart_mode_si = st.radio(
+                            "Mode Chart:", ["📊 Plotly Candlestick (Interaktif)", "📈 TradingView Widget"],
+                            key="chart_mode_tab3", horizontal=True
+                        )
+                        if "Plotly" in chart_mode_si:
+                            show_plotly_candlestick(selected_tv_si)
+                        else:
+                            show_tradingview_widget(selected_tv_si)
 
                     # ── Ringkasan kandidat ──
                     st.markdown("#### 📋 Ringkasan Silent Accumulation Candidates")
@@ -1698,7 +2039,14 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
                 )
                 if selected_tv_all:
                     st.session_state.tv_ticker = selected_tv_all
-                    show_tradingview_widget(selected_tv_all)
+                    chart_mode_all = st.radio(
+                        "Mode Chart:", ["📊 Plotly Candlestick (Interaktif)", "📈 TradingView Widget"],
+                        key="chart_mode_tab4", horizontal=True
+                    )
+                    if "Plotly" in chart_mode_all:
+                        show_plotly_candlestick(selected_tv_all)
+                    else:
+                        show_tradingview_widget(selected_tv_all)
             else:
                 st.info("Tidak ada data yang memenuhi filter.")
 
@@ -1817,7 +2165,7 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
         )
 
         # ── Legenda ──
-        with st.expander("📖 Legenda Indikator v18"):
+        with st.expander("📖 Legenda Indikator v19"):
             st.markdown("""
 | Kolom | Penjelasan |
 |---|---|
@@ -1834,6 +2182,7 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
 | **Rel Vol (20D)** | Volume hari ini vs rata-rata 20 hari |
 | **Rel Vol (50D)** | Volume hari ini vs rata-rata 50 hari |
 | **Chart Analysis** | `Overextended 🚨` · `Breakout Valid 🚀` · `Pullback Healthy 👍` · `Uptrend Normal` · `Downtrend ❌` · `Sideways` |
+| **Visual Chart Analysis** 🆕 | Rule-based analisa visual: Candlestick pattern + Vol Climax + Consolidation Breakout + Trendline Slope + Jarak ke Resistance |
 | **Early Momentum Score** | Skor 0–10 sinyal awal: MFI Change + ADX Rising + MA20 + RSI + Float. ≥6 = menarik |
 | **Pre-Breakout Watch** | `🔭 Watch` = sinyal akumulasi awal tapi belum breakout. Pantau 1–3 hari ke depan |
 | **Silent Score** 🆕 | Skor 0–10 deteksi akumulasi diam-diam: BB Squeeze + OBV + Vol Trend. ≥6 = kandidat |
@@ -1844,14 +2193,27 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
 | **Silent Accum** 🆕 | `🕵️ Silent` = kandidat Silent Accumulation (pola pre-KOTA) |
 | **Composite Rank** 🆕 | Skor 0–10 gabungan untuk prioritas entry: ADX kuat (>50) + Tightness <3% + Vol Trend >2x + Float <20% + OBV Rising + Dekat Resistance. **≥8 = prioritas tertinggi**. Warna biru makin gelap = makin kuat |
 | **Composite Criteria** 🆕 | Detail kriteria yang terpenuhi untuk Composite Rank masing-masing saham |
+
+**Visual Chart Analysis — Detail Pola:**
+| Pola | Keterangan |
+|---|---|
+| Doji | Body sangat kecil (< 10% range candle) — pasar ragu |
+| Hammer 🔨 | Lower shadow ≥ 2× body, di zona support — sinyal reversal bullish |
+| Bullish Engulfing 🟢 | Candle bullish besar menelan candle bearish sebelumnya |
+| Bearish Engulfing 🔴 | Candle bearish besar menelan candle bullish sebelumnya |
+| Shooting Star ⭐ | Upper shadow panjang di zona resistance — sinyal reversal bearish |
+| Vol Climax 💥 | Volume hari ini > 3× rata-rata 20 hari — sinyal kekuatan ekstremal |
+| Consol Breakout 🚀 | Harga keluar dari range sempit (CV < 3%) 10 hari terakhir |
+| Trend:Up ↗ / Down ↘ | Slope linear regression harga 20 hari (arah tren jangka pendek) |
+| Dekat R(x%) | Jarak ke resistance 20D < 2% — tinggal sedikit lagi untuk breakout |
+| Menuju R(x%) | Jarak ke resistance 20D antara 2–5% |
 """)
 
 else:
     st.info(
         f"📂 Database: **{loaded_file}**\n\n"
-        "**Perubahan utama v18:**\n"
-        "- 🆕 **Silent Accumulation Radar**: Tab baru untuk menangkap saham seperti KOTA sebelum terbang\n"
-        "- 🆕 Filter volume terpisah (lebih rendah) untuk saham low-cap yang diakumulasi diam-diam\n"
-        "- 🆕 Indikator baru: BB Squeeze, OBV Trend, Vol Trend Ratio, Price Tightness\n"
-        "- ✅ Semua fitur v17 dipertahankan (Shortlist, Pre-Breakout Watch, TradingView Widget, AI Chart Analysis)"
+        "**Perubahan utama v19:**\n"
+        "- 🆕 **Visual Chart Analysis (B1)**: Kolom rule-based otomatis — Candlestick Pattern, Vol Climax, Consol Breakout, Trendline, Dekat Resistance\n"
+        "- 🆕 **Plotly Candlestick Interaktif (B2)**: Pilih saham → tampil chart OHLCV + MA + Volume + Support/Resistance\n"
+        "- ✅ Semua fitur v18 dipertahankan (Silent Accumulation Radar, Shortlist, Pre-Breakout Watch, TradingView, AI Chart Analysis)"
     )
