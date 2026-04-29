@@ -890,7 +890,7 @@ def fetch_ohlcv_for_plotly(ticker_jk: str, days: int = 90):
         return None
 
 
-def show_plotly_candlestick(ticker_code: str):
+def show_plotly_candlestick(ticker_code: str, chart_key: str = "plotly_chart"):
     """
     Tampilkan Plotly candlestick chart interaktif dengan MA, Volume, Support/Resistance.
     """
@@ -979,7 +979,7 @@ def show_plotly_candlestick(ticker_code: str):
     fig.update_xaxes(showgrid=True, gridcolor="#e0e0e0")
     fig.update_yaxes(showgrid=True, gridcolor="#e0e0e0")
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
     # Tambahan: ringkasan sinyal visual
     c = df['Close']
@@ -1715,7 +1715,7 @@ if st.session_state.analisa_hasil is not None:
                         key="chart_mode_tab1", horizontal=True
                     )
                     if "Plotly" in chart_mode_s:
-                        show_plotly_candlestick(selected_tv_s)
+                        show_plotly_candlestick(selected_tv_s, chart_key=f"plotly_tab1_{selected_tv_s}")
                     else:
                         show_tradingview_widget(selected_tv_s)
 
@@ -1795,7 +1795,7 @@ if st.session_state.analisa_hasil is not None:
                             key="chart_mode_tab2", horizontal=True
                         )
                         if "Plotly" in chart_mode_w:
-                            show_plotly_candlestick(selected_tv_w)
+                            show_plotly_candlestick(selected_tv_w, chart_key=f"plotly_tab2_{selected_tv_w}")
                         else:
                             show_tradingview_widget(selected_tv_w)
 
@@ -1939,7 +1939,7 @@ if st.session_state.analisa_hasil is not None:
                             key="chart_mode_tab3", horizontal=True
                         )
                         if "Plotly" in chart_mode_si:
-                            show_plotly_candlestick(selected_tv_si)
+                            show_plotly_candlestick(selected_tv_si, chart_key=f"plotly_tab3_{selected_tv_si}")
                         else:
                             show_tradingview_widget(selected_tv_si)
 
@@ -2046,7 +2046,7 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
                         key="chart_mode_tab4", horizontal=True
                     )
                     if "Plotly" in chart_mode_all:
-                        show_plotly_candlestick(selected_tv_all)
+                        show_plotly_candlestick(selected_tv_all, chart_key=f"plotly_tab4_{selected_tv_all}")
                     else:
                         show_tradingview_widget(selected_tv_all)
             else:
