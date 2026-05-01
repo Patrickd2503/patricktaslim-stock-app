@@ -14,19 +14,309 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # ─────────────────────────────────────────────
-# BROKER SUMMARY MODULE (v20)
+# BROKER SUMMARY MODULE — EMBEDDED (v20)
+# Sumber: broker_summary_module.py (Remora Trader Screener)
 # ─────────────────────────────────────────────
+import time
+from io import StringIO
 try:
-    from broker_summary_module import (
-        fetch_broker_scores_batch,
-        render_broker_upload_widget,
-        render_broker_detail_tab,
-        style_broker_score,
-        style_broker_signal,
-    )
-    BROKER_MODULE_AVAILABLE = True
+    from bs4 import BeautifulSoup
+    _BS4_OK = True
 except ImportError:
-    BROKER_MODULE_AVAILABLE = False
+    _BS4_OK = False
+
+BROKER_MODULE_AVAILABLE = True  # always available (embedded)
+
+# ── Klasifikasi Broker (Remora Day 3, 4, 5) ──
+SMART_MONEY_BROKERS = {
+    "OD", "ES", "HD", "AK", "ZP", "BK", "AI", "AZ",
+    "MG", "CP", "RF", "YJ", "RX", "FS", "DX",
+}
+RETAIL_BROKERS = {
+    "YP", "XC", "CC", "KK", "SQ", "XL", "GW", "PD", "DH", "FZ",
+}
+
+_BROKER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8",
+    "Referer": "https://rtiindonesia.com/",
+}
+
+
+def _categorize_broker(code: str) -> str:
+    if code in SMART_MONEY_BROKERS: return "smart_money"
+    if code in RETAIL_BROKERS:      return "retail"
+    return "unknown"
+
+
+def _normalize_broker_df(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    col_map = {
+        "broker": "broker_code", "kode": "broker_code", "code": "broker_code", "member": "broker_code",
+        "buy lot": "buy_lot", "lot beli": "buy_lot", "beli (lot)": "buy_lot",
+        "buy (lot)": "buy_lot", "volume buy": "buy_lot",
+        "sell lot": "sell_lot", "lot jual": "sell_lot", "jual (lot)": "sell_lot",
+        "sell (lot)": "sell_lot", "volume sell": "sell_lot",
+        "net lot": "net_lot", "net (lot)": "net_lot",
+        "buy value": "buy_value", "nilai beli": "buy_value", "value buy": "buy_value",
+        "sell value": "sell_value", "nilai jual": "sell_value", "value sell": "sell_value",
+        "net value": "net_value", "nilai net": "net_value",
+    }
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df = df.rename(columns=col_map)
+    if "broker_code" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "broker_code"})
+    if "net_lot" not in df.columns and "buy_lot" in df.columns and "sell_lot" in df.columns:
+        df["net_lot"] = df["buy_lot"] - df["sell_lot"]
+    if "net_value" not in df.columns and "buy_value" in df.columns and "sell_value" in df.columns:
+        df["net_value"] = df["buy_value"] - df["sell_value"]
+    for col in ["buy_lot", "sell_lot", "net_lot", "buy_value", "sell_value", "net_value"]:
+        if col in df.columns:
+            df[col] = (df[col].astype(str)
+                       .str.replace(",", "", regex=False)
+                       .str.replace("(", "-", regex=False)
+                       .str.replace(")", "", regex=False)
+                       .str.strip())
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["broker_code"] = df["broker_code"].astype(str).str.upper().str.strip()
+    df["category"] = df["broker_code"].apply(_categorize_broker)
+    df["ticker"] = ticker
+    return df
+
+
+def fetch_broker_summary_rti(ticker: str, days: int = 30) -> pd.DataFrame | None:
+    ticker = ticker.upper().replace(".JK", "")
+    url = f"https://rtiindonesia.com/market/broker-summary?ticker={ticker}&period={days}"
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=_BROKER_HEADERS, timeout=15)
+            if resp.status_code == 200 and _BS4_OK:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for tbl in soup.find_all("table"):
+                    try:
+                        df = pd.read_html(StringIO(str(tbl)))[0]
+                        cols_lower = [str(c).lower() for c in df.columns]
+                        if any(k in " ".join(cols_lower) for k in ["broker", "buy", "sell", "net"]):
+                            return _normalize_broker_df(df, ticker)
+                    except Exception:
+                        continue
+            time.sleep(2 * (attempt + 1))
+        except Exception:
+            time.sleep(2 * (attempt + 1))
+    # Fallback JSON endpoints
+    for url_j in [
+        f"https://rtiindonesia.com/api/broker-summary?ticker={ticker}&period={days}",
+        f"https://rtiindonesia.com/data/broker/{ticker}?period={days}",
+    ]:
+        try:
+            resp = requests.get(url_j, headers=_BROKER_HEADERS, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                rows = data if isinstance(data, list) else data.get("data", [])
+                if rows:
+                    return _normalize_broker_df(pd.DataFrame(rows), ticker)
+        except Exception:
+            continue
+    return None
+
+
+def compute_broker_score(df_broker: pd.DataFrame, top_n: int = 10) -> dict:
+    empty = {
+        "score": 0, "signal": "No Data", "detail": [],
+        "top_buyers": [], "top_sellers": [],
+        "smart_net_lot": 0, "retail_net_lot": 0,
+        "asing_net_lot": 0, "smart_buy_ratio": 0.0,
+    }
+    if df_broker is None or df_broker.empty:
+        return empty
+
+    score = 0
+    detail = []
+    df_smart  = df_broker[df_broker["category"] == "smart_money"].copy()
+    df_retail = df_broker[df_broker["category"] == "retail"].copy()
+
+    smart_net_lot   = float(df_smart["net_lot"].sum())   if "net_lot"   in df_smart.columns   else 0.0
+    retail_net_lot  = float(df_retail["net_lot"].sum())  if "net_lot"   in df_retail.columns  else 0.0
+    smart_net_value = float(df_smart["net_value"].sum()) if "net_value" in df_smart.columns   else 0.0
+    total_buy_lot   = float(df_broker["buy_lot"].sum())  if "buy_lot"   in df_broker.columns  else 0.0
+    smart_buy_lot   = float(df_smart["buy_lot"].sum())   if "buy_lot"   in df_smart.columns   else 0.0
+
+    if "net_lot" in df_broker.columns:
+        top_buyers  = df_broker.nlargest(top_n,  "net_lot")[["broker_code", "net_lot", "category"]].to_dict("records")
+        top_sellers = df_broker.nsmallest(top_n, "net_lot")[["broker_code", "net_lot", "category"]].to_dict("records")
+    else:
+        top_buyers = top_sellers = []
+
+    top1_cat = top_buyers[0]["category"] if top_buyers else "unknown"
+    asing_brokers = {"ES", "HD", "AK", "ZP", "BK", "AI", "AZ", "RX", "YJ"}
+    df_asing  = df_broker[df_broker["broker_code"].isin(asing_brokers)]
+    asing_net = float(df_asing["net_lot"].sum()) if not df_asing.empty and "net_lot" in df_asing.columns else 0.0
+
+    if top1_cat == "smart_money":
+        score += 3
+        detail.append(f"✅ Top buyer = smart money ({top_buyers[0]['broker_code']}) +3")
+    else:
+        detail.append(f"⚠️ Top buyer = {top1_cat} ({top_buyers[0]['broker_code'] if top_buyers else '-'})")
+
+    if smart_net_lot > 0:
+        score += 2
+        detail.append(f"✅ Smart money net buy: {smart_net_lot:+,.0f} lot +2")
+    elif smart_net_lot < 0:
+        score -= 2
+        detail.append(f"🔴 Smart money net SELL: {smart_net_lot:+,.0f} lot -2 (BAHAYA)")
+
+    if retail_net_lot < 0:
+        score += 1
+        detail.append(f"✅ Retail net sell {retail_net_lot:+,.0f} lot → barang ke smart money +1")
+    else:
+        detail.append(f"⚠️ Retail net buy {retail_net_lot:+,.0f} lot")
+
+    smart_buy_ratio = (smart_buy_lot / total_buy_lot) if total_buy_lot > 0 else 0.0
+    if smart_buy_ratio >= 0.40:
+        score += 1
+        detail.append(f"✅ Smart money buy ratio: {smart_buy_ratio:.1%} +1")
+
+    if smart_net_value > 0:
+        score += 1
+        detail.append(f"✅ Smart money net value positif (Rp {smart_net_value/1e9:.1f}B) +1")
+
+    if asing_net > 0:
+        score += 1
+        detail.append(f"✅ Asing net buy: {asing_net:+,.0f} lot +1")
+    elif asing_net < 0:
+        detail.append(f"⚠️ Asing net sell: {asing_net:+,.0f} lot")
+
+    smart_sellers = df_smart[df_smart["net_lot"] < -10000] if "net_lot" in df_smart.columns else pd.DataFrame()
+    if smart_sellers.empty:
+        score += 1
+        detail.append("✅ Tidak ada smart money distribusi besar +1")
+    else:
+        detail.append(f"⚠️ Ada smart money jual besar: {list(smart_sellers['broker_code'])}")
+
+    if retail_net_lot > 0 and retail_net_lot > smart_net_lot:
+        score -= 1
+        detail.append("🔴 Retail net buy > smart money → FOMO retail -1")
+
+    score = max(0, min(score, 10))
+
+    if   score >= 8: signal = "🟢 Akumulasi Kuat"
+    elif score >= 6: signal = "🟡 Akumulasi"
+    elif score >= 4: signal = "⚪ Netral"
+    elif score >= 2: signal = "🟠 Distribusi"
+    else:            signal = "🔴 Distribusi Kuat"
+
+    return {
+        "score": score, "signal": signal, "detail": detail,
+        "top_buyers": top_buyers, "top_sellers": top_sellers,
+        "smart_net_lot": smart_net_lot, "retail_net_lot": retail_net_lot,
+        "asing_net_lot": asing_net, "smart_buy_ratio": smart_buy_ratio,
+    }
+
+
+def fetch_broker_scores_batch(tickers: list, days: int = 30, delay: float = 1.5,
+                               progress_callback=None) -> dict:
+    results = {}
+    total = len(tickers)
+    for i, ticker in enumerate(tickers):
+        if progress_callback:
+            progress_callback(i / total, f"Fetching broker data: {ticker} ({i+1}/{total})")
+        df_b = fetch_broker_summary_rti(ticker, days=days)
+        if df_b is not None and not df_b.empty:
+            results[ticker] = compute_broker_score(df_b)
+        else:
+            results[ticker] = {
+                "score": 0, "signal": "No Data",
+                "detail": ["❌ Data tidak tersedia dari RTI"],
+                "top_buyers": [], "top_sellers": [],
+                "smart_net_lot": 0, "retail_net_lot": 0,
+                "asing_net_lot": 0, "smart_buy_ratio": 0.0,
+            }
+        time.sleep(delay)
+    if progress_callback:
+        progress_callback(1.0, "Selesai!")
+    return results
+
+
+def style_broker_score(val):
+    try:
+        num = float(val)
+        if num >= 8: return "background-color: #1a6b1a; color: white; font-weight: bold"
+        if num >= 6: return "background-color: #4caf50; color: white; font-weight: bold"
+        if num >= 4: return "background-color: #f5f5f5; color: #333;"
+        if num >= 2: return "background-color: #ff9800; color: white;"
+        if num > 0:  return "background-color: #f44336; color: white; font-weight: bold"
+    except Exception:
+        pass
+    return ""
+
+
+def style_broker_signal(val):
+    val = str(val)
+    if "Akumulasi Kuat"   in val: return "color: #1a6b1a; font-weight: bold"
+    if "Akumulasi"        in val: return "color: #4caf50; font-weight: bold"
+    if "Distribusi Kuat"  in val: return "color: #b71c1c; font-weight: bold"
+    if "Distribusi"       in val: return "color: #ff6600;"
+    if "No Data"          in val: return "color: #aaa;"
+    return ""
+
+
+def render_broker_detail_tab(ticker: str, broker_result: dict):
+    st.markdown(f"### 🏦 Broker Summary: **{ticker}**")
+    score  = broker_result.get("score", 0)
+    signal = broker_result.get("signal", "No Data")
+    detail = broker_result.get("detail", [])
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Broker Score",     f"{score}/10")
+    col2.metric("Signal",           signal)
+    col3.metric("Smart Net (Lot)",  f"{broker_result.get('smart_net_lot', 0):+,.0f}")
+    col4.metric("Retail Net (Lot)", f"{broker_result.get('retail_net_lot', 0):+,.0f}")
+    st.markdown("**Detail Analisa:**")
+    for d in detail:
+        st.markdown(f"- {d}")
+    col_b, col_s = st.columns(2)
+    with col_b:
+        st.markdown("**🟢 Top Net Buyers:**")
+        for row in broker_result.get("top_buyers", [])[:5]:
+            icon = "⭐" if row["category"] == "smart_money" else "👤"
+            st.markdown(f"{icon} **{row['broker_code']}** — {row['net_lot']:+,.0f} lot")
+    with col_s:
+        st.markdown("**🔴 Top Net Sellers:**")
+        for row in broker_result.get("top_sellers", [])[:5]:
+            icon = "⭐" if row["category"] == "smart_money" else "👤"
+            st.markdown(f"{icon} **{row['broker_code']}** — {row['net_lot']:+,.0f} lot")
+
+
+def render_broker_upload_widget() -> dict:
+    st.markdown("#### 📁 Upload Broker Summary CSV")
+    st.caption(
+        "Download dari RTI Business / IDX → lalu upload di sini. "
+        "Format nama file: `KODE_broker.csv` (contoh: `BBCA_broker.csv`)"
+    )
+    uploaded_files = st.file_uploader(
+        "Upload file CSV broker summary",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="broker_csv_upload",
+    )
+    results = {}
+    if uploaded_files:
+        for f in uploaded_files:
+            name   = f.name.replace("_broker", "").replace(".csv", "").upper()
+            ticker = name.split("_")[0]
+            try:
+                df_b   = pd.read_csv(f, thousands=",", encoding="utf-8-sig")
+                df_b   = _normalize_broker_df(df_b, ticker)
+                result = compute_broker_score(df_b)
+                results[ticker] = result
+                st.success(f"✅ {ticker}: {result['signal']} (Score {result['score']}/10)")
+            except Exception as e:
+                st.error(f"❌ Gagal parse {f.name}: {e}")
+    return results
 
 # ─────────────────────────────────────────────
 # SETUP (jalankan sekali sebelum app pertama kali):
@@ -1543,7 +1833,7 @@ st.sidebar.caption("ℹ️ Data historis otomatis diambil 120 hari ke belakang u
 # ── SIDEBAR BROKER SUMMARY (v20) ──
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 v20: Broker Summary Analysis")
-if BROKER_MODULE_AVAILABLE:
+if True:
     enable_broker   = st.sidebar.checkbox("Aktifkan Broker Summary Analysis", value=True)
     broker_mode     = st.sidebar.radio(
         "Mode Data Broker",
@@ -1615,7 +1905,7 @@ def apply_full_style(df_styled, include_score=True, include_watch=False, include
         _map(style_bb_squeeze,   'BB Squeeze')
         _map(style_obv_trend,    'OBV Trend')
     _map(style_composite_rank, 'Composite Rank')
-    if include_broker and BROKER_MODULE_AVAILABLE:
+    if include_broker:
         _map(style_broker_score,  'Broker Score')
         _map(style_broker_signal, 'Broker Signal')
     return styled
@@ -1648,7 +1938,7 @@ if btn_analisa:
 
             # ── BROKER SUMMARY SCORING (v20) ──
             broker_scores = {}
-            if enable_broker and BROKER_MODULE_AVAILABLE:
+            if enable_broker:
                 if broker_mode == "🌐 Auto Fetch RTI":
                     all_tickers_for_broker = df_res['Kode Saham'].tolist()
                     progress_bar = st.progress(0, text="Fetching broker data dari RTI...")
@@ -1731,7 +2021,7 @@ if st.session_state.analisa_hasil is not None:
     moonstock_list   = _h.get("moonstock_list", [])
 
     # ── Upload CSV broker (mode manual, di luar tombol analisa) ──
-    if enable_broker and BROKER_MODULE_AVAILABLE and broker_mode == "📁 Upload CSV Manual":
+    if enable_broker and broker_mode == "📁 Upload CSV Manual":
         with st.expander("📁 Upload Broker Summary CSV (Mode Manual)", expanded=not broker_scores):
             uploaded_broker = render_broker_upload_widget()
             if uploaded_broker:
@@ -1764,7 +2054,7 @@ if st.session_state.analisa_hasil is not None:
         comp_rank_col  = ['Composite Rank', 'Composite Criteria'] if show_composite_rank else []
         watch_col      = ['Pre-Breakout Watch']
         silent_col     = ['Silent Score', 'BB Squeeze', 'OBV Trend', 'Vol Trend Ratio', 'Silent Accum']
-        broker_col     = ['Broker Score', 'Broker Signal', 'Smart Net Lot', 'Asing Net Lot'] if (enable_broker and BROKER_MODULE_AVAILABLE and broker_scores) else []
+        broker_col     = ['Broker Score', 'Broker Signal', 'Smart Net Lot', 'Asing Net Lot'] if (enable_broker and broker_scores) else []
         reason_col     = ['Shortlist Reasons', 'Chart Analysis', 'Visual Chart Analysis']
 
         all_display_cols = base_cols + score_col + comp_rank_col + watch_col + silent_col + broker_col + reason_col
@@ -1779,7 +2069,7 @@ if st.session_state.analisa_hasil is not None:
             df_res_filtered = df_res_filtered.sort_values(sort_cols, ascending=False)
 
         # ── TAB LAYOUT ──
-        has_broker_data = enable_broker and BROKER_MODULE_AVAILABLE and bool(broker_scores)
+        has_broker_data = enable_broker and bool(broker_scores)
         tab_labels = [
             "🔥 Shortlist Utama",
             "🔭 Pre-Breakout Watch (Opsi A)",
@@ -2214,7 +2504,7 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
                         moon_styled = df_moon_all[moon_cols].style
                         if 'Moonstock Score' in moon_cols:
                             moon_styled = moon_styled.map(style_moonstock_score, subset=['Moonstock Score'])
-                        if BROKER_MODULE_AVAILABLE:
+                        if True:
                             if 'Broker Score' in moon_cols:
                                 moon_styled = moon_styled.map(style_broker_score, subset=['Broker Score'])
                             if 'Broker Signal' in moon_cols:
