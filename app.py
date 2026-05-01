@@ -1833,28 +1833,43 @@ st.sidebar.caption("ℹ️ Data historis otomatis diambil 120 hari ke belakang u
 # ── SIDEBAR BROKER SUMMARY (v20) ──
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 v20: Broker Summary Analysis")
-if True:
-    enable_broker   = st.sidebar.checkbox("Aktifkan Broker Summary Analysis", value=True)
-    broker_mode     = st.sidebar.radio(
-        "Mode Data Broker",
-        ["🌐 Auto Fetch RTI", "📁 Upload CSV Manual"],
-        help="Auto Fetch: scrape RTI Business otomatis. Upload CSV: dari IDX/RTI/Stockbit manual."
+enable_broker   = st.sidebar.checkbox("Aktifkan Broker Summary Analysis", value=True)
+broker_mode     = st.sidebar.radio(
+    "Mode Data Broker",
+    ["🌐 Auto Fetch RTI", "📁 Upload CSV Manual"],
+    help="Auto Fetch: scrape RTI Business otomatis. Upload CSV: dari IDX/RTI/Stockbit manual."
+)
+if broker_mode == "🌐 Auto Fetch RTI":
+    broker_scope = st.sidebar.radio(
+        "Saham yang di-fetch broker datanya:",
+        [
+            "⭐ Shortlist + Pre-Breakout + Silent (rekomendasi)",
+            "🔥 Shortlist + Pre-Breakout saja",
+            "🏆 Shortlist saja (tercepat)",
+            "📊 Semua hasil analisa (⚠️ lambat)",
+        ],
+        index=0,
+        help=(
+            "Rekomendasi: Shortlist + Pre-Breakout + Silent — cukup 10–50 saham, "
+            "fetch ~1–2 menit. 'Semua hasil' bisa ratusan saham dan sangat lambat."
+        )
     )
-    broker_days     = st.sidebar.slider("Periode Broker Summary (hari)", 5, 60, 30)
-    min_broker_score = st.sidebar.slider(
-        "Min Broker Score untuk Moonstock", 0, 10, 6,
-        help="≥6 = Akumulasi. ≥8 = Akumulasi Kuat. Dipakai untuk filter tab Moonstock Radar."
-    )
+    broker_days = st.sidebar.slider("Periode Broker Summary (hari)", 5, 60, 30)
     st.sidebar.caption(
-        "Broker Score 0–10 berdasarkan smart money net buy, rasio asing, dan pola distribusi. "
-        "Score ≥6 = akumulasi institusi terdeteksi."
+        "⏱️ Estimasi waktu fetch: ~1.5 detik/saham. "
+        "Untuk 30 saham ≈ 45 detik. Gunakan scope sesempit mungkin."
     )
 else:
-    enable_broker    = False
-    broker_mode      = "📁 Upload CSV Manual"
-    broker_days      = 30
-    min_broker_score = 6
-    st.sidebar.warning("⚠️ broker_summary_module.py tidak ditemukan. Letakkan di folder yang sama dengan app ini.")
+    broker_scope = "📁 Upload CSV Manual"
+    broker_days  = 30
+min_broker_score = st.sidebar.slider(
+    "Min Broker Score untuk Moonstock", 0, 10, 6,
+    help="≥6 = Akumulasi. ≥8 = Akumulasi Kuat. Dipakai untuk filter tab Moonstock Radar."
+)
+st.sidebar.caption(
+    "Broker Score 0–10: smart money net buy, rasio asing, pola distribusi. "
+    "Score ≥6 = akumulasi institusi terdeteksi."
+)
 
 st.sidebar.markdown("---")
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True, type="primary")
@@ -1940,16 +1955,54 @@ if btn_analisa:
             broker_scores = {}
             if enable_broker:
                 if broker_mode == "🌐 Auto Fetch RTI":
-                    all_tickers_for_broker = df_res['Kode Saham'].tolist()
-                    progress_bar = st.progress(0, text="Fetching broker data dari RTI...")
-                    def _broker_progress(frac, msg):
-                        progress_bar.progress(frac, text=msg)
-                    broker_scores = fetch_broker_scores_batch(
-                        all_tickers_for_broker,
-                        days=broker_days,
-                        progress_callback=_broker_progress,
-                    )
-                    progress_bar.empty()
+                    # Tentukan daftar saham sesuai scope pilihan user
+                    if "Semua hasil analisa" in broker_scope:
+                        tickers_for_broker = df_res['Kode Saham'].tolist()
+                    elif "Shortlist + Pre-Breakout + Silent" in broker_scope:
+                        tickers_for_broker = list(dict.fromkeys(
+                            shortlist + prebreakout_list + silent_list
+                        ))
+                    elif "Shortlist + Pre-Breakout" in broker_scope:
+                        tickers_for_broker = list(dict.fromkeys(
+                            shortlist + prebreakout_list
+                        ))
+                    else:  # Shortlist saja
+                        tickers_for_broker = list(shortlist)
+
+                    n_fetch = len(tickers_for_broker)
+                    est_sec = n_fetch * 1.5
+
+                    # Warning jika > 50 saham
+                    if n_fetch > 50:
+                        st.warning(
+                            f"⚠️ Scope yang dipilih akan men-fetch **{n_fetch} saham** "
+                            f"(estimasi ~{est_sec/60:.1f} menit). "
+                            f"Pertimbangkan scope yang lebih sempit di sidebar."
+                        )
+
+                    if n_fetch == 0:
+                        st.info(
+                            "ℹ️ Tidak ada saham dalam scope yang dipilih untuk di-fetch broker datanya. "
+                            "Coba perluas scope atau jalankan analisa dulu."
+                        )
+                    else:
+                        scope_label = broker_scope.split("(")[0].strip()
+                        progress_bar = st.progress(
+                            0,
+                            text=f"Fetching broker data [{scope_label}] — {n_fetch} saham, est. {est_sec:.0f} detik..."
+                        )
+                        def _broker_progress(frac, msg):
+                            progress_bar.progress(frac, text=msg)
+                        broker_scores = fetch_broker_scores_batch(
+                            tickers_for_broker,
+                            days=broker_days,
+                            progress_callback=_broker_progress,
+                        )
+                        progress_bar.empty()
+                        st.success(
+                            f"✅ Broker data berhasil diambil untuk **{n_fetch} saham** "
+                            f"(scope: {scope_label})"
+                        )
                 # Upload CSV mode: broker_scores akan diisi di render section
 
                 # Tambahkan kolom broker ke df_res (untuk mode auto-fetch)
