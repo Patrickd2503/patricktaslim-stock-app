@@ -18,12 +18,6 @@ from plotly.subplots import make_subplots
 # Sumber: broker_summary_module.py (Remora Trader Screener)
 # ─────────────────────────────────────────────
 import time
-from io import StringIO
-try:
-    from bs4 import BeautifulSoup
-    _BS4_OK = True
-except ImportError:
-    _BS4_OK = False
 
 BROKER_MODULE_AVAILABLE = True  # always available (embedded)
 
@@ -36,16 +30,53 @@ RETAIL_BROKERS = {
     "YP", "XC", "CC", "KK", "SQ", "XL", "GW", "PD", "DH", "FZ",
 }
 
-_BROKER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8",
-    "Referer": "https://rtiindonesia.com/",
+# ── Stockbit API ──────────────────────────────
+# Stockbit menggunakan JWT Bearer token dari login.
+# Token disimpan di st.session_state agar tidak login ulang setiap fetch.
+_SB_LOGIN_URL  = "https://api.stockbit.com/v2.4/auth/login"
+_SB_BROKER_URL = "https://api.stockbit.com/v2.4/symbol/{ticker}/brokerstatistic"
+_SB_HEADERS_BASE = {
+    "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept":       "application/json, text/plain, */*",
+    "Origin":       "https://stockbit.com",
+    "Referer":      "https://stockbit.com/",
 }
+
+def _sb_get_token(username: str, password: str) -> str | None:
+    """Login ke Stockbit dan return Bearer token. None jika gagal."""
+    try:
+        r = requests.post(
+            _SB_LOGIN_URL,
+            json={"username": username, "password": password},
+            headers=_SB_HEADERS_BASE,
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            # Response: {"data": {"token": "...", "user": {...}}, "message": "OK"}
+            token = (data.get("data") or {}).get("token")
+            if not token:
+                # Coba key alternatif
+                token = data.get("token") or data.get("access_token")
+            return token
+        return None
+    except Exception:
+        return None
+
+
+def _sb_headers_auth(token: str) -> dict:
+    h = dict(_SB_HEADERS_BASE)
+    h["Authorization"] = f"Bearer {token}"
+    return h
+
+
+def _period_to_sb(days: int) -> str:
+    """Konversi hari ke format period Stockbit: 1w/1m/3m/6m/1y."""
+    if days <= 7:   return "1w"
+    if days <= 30:  return "1m"
+    if days <= 90:  return "3m"
+    if days <= 180: return "6m"
+    return "1y"
 
 
 def _categorize_broker(code: str) -> str:
@@ -55,12 +86,20 @@ def _categorize_broker(code: str) -> str:
 
 
 def _normalize_broker_df(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """Normalisasi DataFrame broker dari berbagai format (Stockbit / CSV upload)."""
     col_map = {
-        "broker": "broker_code", "kode": "broker_code", "code": "broker_code", "member": "broker_code",
-        "buy lot": "buy_lot", "lot beli": "buy_lot", "beli (lot)": "buy_lot",
-        "buy (lot)": "buy_lot", "volume buy": "buy_lot",
-        "sell lot": "sell_lot", "lot jual": "sell_lot", "jual (lot)": "sell_lot",
-        "sell (lot)": "sell_lot", "volume sell": "sell_lot",
+        # Stockbit API field names
+        "broker": "broker_code", "broker_id": "broker_code",
+        "buylot": "buy_lot",  "buy_lot": "buy_lot",  "lot beli": "buy_lot",
+        "selllot": "sell_lot", "sell_lot": "sell_lot", "lot jual": "sell_lot",
+        "netlot": "net_lot",  "net_lot": "net_lot",
+        "buyvalue": "buy_value",  "buy_value": "buy_value",
+        "sellvalue": "sell_value", "sell_value": "sell_value",
+        "netvalue": "net_value",  "net_value": "net_value",
+        # CSV upload aliases
+        "kode": "broker_code", "code": "broker_code", "member": "broker_code",
+        "buy lot": "buy_lot", "beli (lot)": "buy_lot", "buy (lot)": "buy_lot",
+        "sell lot": "sell_lot", "jual (lot)": "sell_lot", "sell (lot)": "sell_lot",
         "net lot": "net_lot", "net (lot)": "net_lot",
         "buy value": "buy_value", "nilai beli": "buy_value", "value buy": "buy_value",
         "sell value": "sell_value", "nilai jual": "sell_value", "value sell": "sell_value",
@@ -84,44 +123,39 @@ def _normalize_broker_df(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
                        .str.strip())
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     df["broker_code"] = df["broker_code"].astype(str).str.upper().str.strip()
-    df["category"] = df["broker_code"].apply(_categorize_broker)
-    df["ticker"] = ticker
+    df["category"]    = df["broker_code"].apply(_categorize_broker)
+    df["ticker"]      = ticker
     return df
 
 
-def fetch_broker_summary_rti(ticker: str, days: int = 30) -> pd.DataFrame | None:
-    ticker = ticker.upper().replace(".JK", "")
-    url = f"https://rtiindonesia.com/market/broker-summary?ticker={ticker}&period={days}"
+def fetch_broker_summary_stockbit(ticker: str, token: str, days: int = 30) -> pd.DataFrame | None:
+    """Ambil broker summary dari Stockbit API menggunakan Bearer token."""
+    ticker  = ticker.upper().replace(".JK", "")
+    period  = _period_to_sb(days)
+    url     = _SB_BROKER_URL.format(ticker=ticker)
+    headers = _sb_headers_auth(token)
+
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=_BROKER_HEADERS, timeout=15)
-            if resp.status_code == 200 and _BS4_OK:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                for tbl in soup.find_all("table"):
-                    try:
-                        df = pd.read_html(StringIO(str(tbl)))[0]
-                        cols_lower = [str(c).lower() for c in df.columns]
-                        if any(k in " ".join(cols_lower) for k in ["broker", "buy", "sell", "net"]):
-                            return _normalize_broker_df(df, ticker)
-                    except Exception:
-                        continue
-            time.sleep(2 * (attempt + 1))
-        except Exception:
-            time.sleep(2 * (attempt + 1))
-    # Fallback JSON endpoints
-    for url_j in [
-        f"https://rtiindonesia.com/api/broker-summary?ticker={ticker}&period={days}",
-        f"https://rtiindonesia.com/data/broker/{ticker}?period={days}",
-    ]:
-        try:
-            resp = requests.get(url_j, headers=_BROKER_HEADERS, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                rows = data if isinstance(data, list) else data.get("data", [])
+            r = requests.get(
+                url,
+                params={"limit": 100, "offset": 0, "period": period},
+                headers=headers,
+                timeout=15,
+            )
+            if r.status_code == 401:
+                return None  # token expired — caller harus re-login
+            if r.status_code == 200:
+                data = r.json()
+                # Stockbit response: {"data": {"brokers": [...]} , "message": "OK"}
+                # atau {"data": [...]}
+                inner = data.get("data", {})
+                rows  = inner.get("brokers") or inner.get("broker") or (inner if isinstance(inner, list) else [])
                 if rows:
                     return _normalize_broker_df(pd.DataFrame(rows), ticker)
+            time.sleep(1.5 * (attempt + 1))
         except Exception:
-            continue
+            time.sleep(1.5 * (attempt + 1))
     return None
 
 
@@ -218,27 +252,44 @@ def compute_broker_score(df_broker: pd.DataFrame, top_n: int = 10) -> dict:
     }
 
 
-def fetch_broker_scores_batch(tickers: list, days: int = 30, delay: float = 1.5,
-                               progress_callback=None) -> dict:
+def fetch_broker_scores_batch(tickers: list, token: str, days: int = 30,
+                               delay: float = 1.0, progress_callback=None) -> dict:
+    """
+    Fetch broker summary dari Stockbit untuk batch tickers.
+    token : Bearer token dari _sb_get_token()
+    Jika token expired di tengah jalan, fungsi berhenti dan return hasil parsial.
+    """
     results = {}
-    total = len(tickers)
+    total   = len(tickers)
     for i, ticker in enumerate(tickers):
         if progress_callback:
-            progress_callback(i / total, f"Fetching broker data: {ticker} ({i+1}/{total})")
-        df_b = fetch_broker_summary_rti(ticker, days=days)
-        if df_b is not None and not df_b.empty:
-            results[ticker] = compute_broker_score(df_b)
-        else:
+            progress_callback(
+                i / total,
+                f"📊 Fetching Stockbit broker: {ticker} ({i+1}/{total})"
+            )
+        df_b = fetch_broker_summary_stockbit(ticker, token=token, days=days)
+        if df_b is None:
+            # None bisa berarti token expired atau network error
             results[ticker] = {
                 "score": 0, "signal": "No Data",
-                "detail": ["❌ Data tidak tersedia dari RTI"],
+                "detail": ["❌ Gagal ambil data (token expired atau network error)"],
                 "top_buyers": [], "top_sellers": [],
                 "smart_net_lot": 0, "retail_net_lot": 0,
                 "asing_net_lot": 0, "smart_buy_ratio": 0.0,
             }
+        elif df_b.empty:
+            results[ticker] = {
+                "score": 0, "signal": "No Data",
+                "detail": ["⚠️ Data broker kosong dari Stockbit"],
+                "top_buyers": [], "top_sellers": [],
+                "smart_net_lot": 0, "retail_net_lot": 0,
+                "asing_net_lot": 0, "smart_buy_ratio": 0.0,
+            }
+        else:
+            results[ticker] = compute_broker_score(df_b)
         time.sleep(delay)
     if progress_callback:
-        progress_callback(1.0, "Selesai!")
+        progress_callback(1.0, "✅ Selesai!")
     return results
 
 
@@ -1833,15 +1884,37 @@ st.sidebar.caption("ℹ️ Data historis otomatis diambil 120 hari ke belakang u
 # ── SIDEBAR BROKER SUMMARY (v20) ──
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 v20: Broker Summary Analysis")
-enable_broker   = st.sidebar.checkbox("Aktifkan Broker Summary Analysis", value=True)
-broker_mode     = st.sidebar.radio(
+enable_broker = st.sidebar.checkbox("Aktifkan Broker Summary Analysis", value=True)
+
+broker_mode = st.sidebar.radio(
     "Mode Data Broker",
-    ["🌐 Auto Fetch RTI", "📁 Upload CSV Manual"],
-    help="Auto Fetch: scrape RTI Business otomatis. Upload CSV: dari IDX/RTI/Stockbit manual."
+    ["🌐 Auto Fetch Stockbit", "📁 Upload CSV Manual"],
+    help=(
+        "Auto Fetch: ambil data broker via Stockbit API (butuh login Stockbit). "
+        "Upload CSV: export manual dari RTI/Stockbit lalu upload."
+    )
 )
-if broker_mode == "🌐 Auto Fetch RTI":
+
+if broker_mode == "🌐 Auto Fetch Stockbit":
+    st.sidebar.markdown("**🔑 Login Stockbit**")
+    sb_username = st.sidebar.text_input(
+        "Username / Email Stockbit",
+        key="sb_username",
+        placeholder="email@gmail.com",
+        help="Username atau email akun Stockbit Anda. Tidak disimpan ke server manapun."
+    )
+    sb_password = st.sidebar.text_input(
+        "Password Stockbit",
+        type="password",
+        key="sb_password",
+        help="Password akun Stockbit. Hanya digunakan untuk mengambil Bearer token."
+    )
+    st.sidebar.caption(
+        "🔒 Kredensial hanya dipakai untuk generate Bearer token sesi ini. "
+        "Tidak disimpan ke disk maupun server."
+    )
     broker_scope = st.sidebar.radio(
-        "Saham yang di-fetch broker datanya:",
+        "Saham yang di-fetch:",
         [
             "⭐ Shortlist + Pre-Breakout + Silent (rekomendasi)",
             "🔥 Shortlist + Pre-Breakout saja",
@@ -1849,19 +1922,19 @@ if broker_mode == "🌐 Auto Fetch RTI":
             "📊 Semua hasil analisa (⚠️ lambat)",
         ],
         index=0,
-        help=(
-            "Rekomendasi: Shortlist + Pre-Breakout + Silent — cukup 10–50 saham, "
-            "fetch ~1–2 menit. 'Semua hasil' bisa ratusan saham dan sangat lambat."
-        )
+        help="Rekomendasi: 10–50 saham, ~30–60 detik. 'Semua hasil' bisa sangat lambat."
     )
-    broker_days = st.sidebar.slider("Periode Broker Summary (hari)", 5, 60, 30)
+    broker_days = st.sidebar.slider("Periode Broker Summary (hari)", 5, 180, 30)
     st.sidebar.caption(
-        "⏱️ Estimasi waktu fetch: ~1.5 detik/saham. "
-        "Untuk 30 saham ≈ 45 detik. Gunakan scope sesempit mungkin."
+        "⏱️ Estimasi: ~1 detik/saham. "
+        "30 saham ≈ 30 detik. Pilih scope sesempit mungkin."
     )
 else:
+    sb_username  = ""
+    sb_password  = ""
     broker_scope = "📁 Upload CSV Manual"
     broker_days  = 30
+
 min_broker_score = st.sidebar.slider(
     "Min Broker Score untuk Moonstock", 0, 10, 6,
     help="≥6 = Akumulasi. ≥8 = Akumulasi Kuat. Dipakai untuk filter tab Moonstock Radar."
@@ -1873,9 +1946,10 @@ st.sidebar.caption(
 
 st.sidebar.markdown("---")
 btn_analisa = st.sidebar.button("🚀 JALANKAN ANALISA", use_container_width=True, type="primary")
-if st.sidebar.button("🗑️ Clear Cache", use_container_width=True):
+if st.sidebar.button("🗑️ Clear Cache + Logout Stockbit", use_container_width=True):
     st.cache_data.clear()
-    st.sidebar.success("Cache berhasil dibersihkan! Silakan klik JALANKAN ANALISA ulang.")
+    st.session_state.pop("sb_token", None)
+    st.sidebar.success("Cache & token Stockbit dibersihkan! Silakan login ulang dan klik JALANKAN ANALISA.")
 
 # ─────────────────────────────────────────────
 # 8. FORMAT & STYLE
@@ -1951,58 +2025,95 @@ if btn_analisa:
                 min_silent_score=min_silent_score,
             )
 
-            # ── BROKER SUMMARY SCORING (v20) ──
+            # ── BROKER SUMMARY SCORING (v20) via Stockbit ──
             broker_scores = {}
             if enable_broker:
-                if broker_mode == "🌐 Auto Fetch RTI":
-                    # Tentukan daftar saham sesuai scope pilihan user
-                    if "Semua hasil analisa" in broker_scope:
-                        tickers_for_broker = df_res['Kode Saham'].tolist()
-                    elif "Shortlist + Pre-Breakout + Silent" in broker_scope:
-                        tickers_for_broker = list(dict.fromkeys(
-                            shortlist + prebreakout_list + silent_list
-                        ))
-                    elif "Shortlist + Pre-Breakout" in broker_scope:
-                        tickers_for_broker = list(dict.fromkeys(
-                            shortlist + prebreakout_list
-                        ))
-                    else:  # Shortlist saja
-                        tickers_for_broker = list(shortlist)
-
-                    n_fetch = len(tickers_for_broker)
-                    est_sec = n_fetch * 1.5
-
-                    # Warning jika > 50 saham
-                    if n_fetch > 50:
+                if broker_mode == "🌐 Auto Fetch Stockbit":
+                    # ── Validasi kredensial ──
+                    if not sb_username or not sb_password:
                         st.warning(
-                            f"⚠️ Scope yang dipilih akan men-fetch **{n_fetch} saham** "
-                            f"(estimasi ~{est_sec/60:.1f} menit). "
-                            f"Pertimbangkan scope yang lebih sempit di sidebar."
-                        )
-
-                    if n_fetch == 0:
-                        st.info(
-                            "ℹ️ Tidak ada saham dalam scope yang dipilih untuk di-fetch broker datanya. "
-                            "Coba perluas scope atau jalankan analisa dulu."
+                            "⚠️ Masukkan **Username** dan **Password Stockbit** di sidebar "
+                            "sebelum menjalankan analisa dengan Broker Summary aktif."
                         )
                     else:
-                        scope_label = broker_scope.split("(")[0].strip()
-                        progress_bar = st.progress(
-                            0,
-                            text=f"Fetching broker data [{scope_label}] — {n_fetch} saham, est. {est_sec:.0f} detik..."
-                        )
-                        def _broker_progress(frac, msg):
-                            progress_bar.progress(frac, text=msg)
-                        broker_scores = fetch_broker_scores_batch(
-                            tickers_for_broker,
-                            days=broker_days,
-                            progress_callback=_broker_progress,
-                        )
-                        progress_bar.empty()
-                        st.success(
-                            f"✅ Broker data berhasil diambil untuk **{n_fetch} saham** "
-                            f"(scope: {scope_label})"
-                        )
+                        # ── Login Stockbit (cache token di session_state) ──
+                        token = st.session_state.get("sb_token")
+                        if not token:
+                            with st.spinner("🔑 Login ke Stockbit..."):
+                                token = _sb_get_token(sb_username, sb_password)
+                            if token:
+                                st.session_state["sb_token"] = token
+                                st.success("✅ Login Stockbit berhasil! Token tersimpan untuk sesi ini.")
+                            else:
+                                st.error(
+                                    "❌ Login Stockbit gagal. Periksa username/password di sidebar. "
+                                    "Pastikan akun Stockbit Anda aktif."
+                                )
+
+                        if token:
+                            # ── Tentukan scope saham ──
+                            if "Semua hasil analisa" in broker_scope:
+                                tickers_for_broker = df_res['Kode Saham'].tolist()
+                            elif "Shortlist + Pre-Breakout + Silent" in broker_scope:
+                                tickers_for_broker = list(dict.fromkeys(
+                                    shortlist + prebreakout_list + silent_list
+                                ))
+                            elif "Shortlist + Pre-Breakout" in broker_scope:
+                                tickers_for_broker = list(dict.fromkeys(
+                                    shortlist + prebreakout_list
+                                ))
+                            else:
+                                tickers_for_broker = list(shortlist)
+
+                            n_fetch = len(tickers_for_broker)
+                            est_sec = n_fetch * 1.0
+
+                            if n_fetch == 0:
+                                st.info(
+                                    "ℹ️ Tidak ada saham dalam scope yang dipilih. "
+                                    "Coba perluas scope atau jalankan analisa dulu."
+                                )
+                            else:
+                                if n_fetch > 50:
+                                    st.warning(
+                                        f"⚠️ **{n_fetch} saham** akan di-fetch "
+                                        f"(estimasi ~{est_sec/60:.1f} menit). "
+                                        "Pertimbangkan scope lebih sempit di sidebar."
+                                    )
+                                scope_label = broker_scope.split("(")[0].strip()
+                                prog = st.progress(
+                                    0,
+                                    text=f"📊 Stockbit broker fetch [{scope_label}] — {n_fetch} saham, est. {est_sec:.0f} detik..."
+                                )
+                                def _broker_progress(frac, msg):
+                                    prog.progress(min(frac, 1.0), text=msg)
+
+                                broker_scores = fetch_broker_scores_batch(
+                                    tickers_for_broker,
+                                    token=token,
+                                    days=broker_days,
+                                    delay=1.0,
+                                    progress_callback=_broker_progress,
+                                )
+                                prog.empty()
+
+                                # Cek apakah semua No Data (indikasi token expired)
+                                no_data_count = sum(
+                                    1 for v in broker_scores.values()
+                                    if v.get("signal") == "No Data"
+                                )
+                                if no_data_count == n_fetch and n_fetch > 0:
+                                    st.error(
+                                        "❌ Semua saham gagal di-fetch — kemungkinan token Stockbit expired. "
+                                        "Klik **Clear Cache** di sidebar lalu jalankan ulang untuk login ulang."
+                                    )
+                                    st.session_state.pop("sb_token", None)
+                                else:
+                                    ok_count = n_fetch - no_data_count
+                                    st.success(
+                                        f"✅ Stockbit broker data: **{ok_count}/{n_fetch} saham** berhasil "
+                                        f"(scope: {scope_label})"
+                                    )
                 # Upload CSV mode: broker_scores akan diisi di render section
 
                 # Tambahkan kolom broker ke df_res (untuk mode auto-fetch)
@@ -2074,7 +2185,7 @@ if st.session_state.analisa_hasil is not None:
     moonstock_list   = _h.get("moonstock_list", [])
 
     # ── Upload CSV broker (mode manual, di luar tombol analisa) ──
-    if enable_broker and broker_mode == "📁 Upload CSV Manual":
+    if enable_broker and "Upload CSV" in broker_mode:
         with st.expander("📁 Upload Broker Summary CSV (Mode Manual)", expanded=not broker_scores):
             uploaded_broker = render_broker_upload_widget()
             if uploaded_broker:
@@ -2524,7 +2635,7 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
 """)
 
                 # Upload CSV mode: tampilkan widget di sini jika belum ada data
-                if broker_mode == "📁 Upload CSV Manual" and not broker_scores:
+                if "Upload CSV" in broker_mode and not broker_scores:
                     st.info("Upload file CSV broker di expander di atas untuk mengaktifkan Moonstock Radar.")
                 elif not broker_scores:
                     st.warning("Broker data belum tersedia. Jalankan analisa dengan Broker Summary diaktifkan.")
