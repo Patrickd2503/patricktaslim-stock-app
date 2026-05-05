@@ -6,7 +6,7 @@ import numpy as np
 from datetime import date, timedelta
 import os
 from io import BytesIO
-import pandas_ta as pta
+import ta
 import requests
 import base64
 import json
@@ -376,18 +376,15 @@ def render_broker_upload_widget() -> dict:
 # ─────────────────────────────────────────────
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI v20", layout="wide")
-st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v20 – Broker Summary Analysis")
+st.set_page_config(page_title="Monitor Saham BEI v23", layout="wide")
+st.title("🚀 Dashboard Akumulasi: Smart Money Monitor v23 – Coil Watch & Entry Readiness")
 
 st.markdown("""
-**Update v20:**
-- ✅ Semua fitur v19 dipertahankan (Visual Chart Analysis, Plotly Candlestick, Silent Accumulation Radar, AI Chart Analysis)
-- 🆕 **Broker Summary Analysis** — Analisa aliran dana berdasarkan data broker RTI Business:
-  - Smart Money vs Retail broker tracking (klasifikasi broker Remora Day 3, 4, 5)
-  - Broker Score 0–10: Net buy smart money, rasio asing, distribusi broker
-  - Signal: Akumulasi Kuat / Akumulasi / Netral / Distribusi / Distribusi Kuat
-  - Tab baru **🌙 Moonstock Radar** — gabungan 5 kriteria: Broker + Early Momentum + Silent + MA20 + Market RS
-  - Mode data: Auto Fetch RTI Business atau Upload CSV Manual
+**Update v23:**
+- ✅ Semua fitur v22 dipertahankan (Backtest Akurat, Live Signal, AI Chart Analysis, dll)
+- 🆕 **Tab Coil Watch** — filter otomatis saham "pegas terkompresi": ADX kuat + sideways ketat + dekat resistance. Menangkap pola seperti BSBK sebelum terbang
+- 🆕 **Kolom Entry Readiness** — scoring 0–3 sinyal trigger nyata (Volume Spike, MFI Lonjak, Breakout). Hijau = siap entry, Kuning = tunggu, Abu = belum
+- 🆕 **Sheet Coil Watch di Excel** — ikut ter-export bersama sheet lainnya
 """)
 
 # ─────────────────────────────────────────────
@@ -396,10 +393,21 @@ st.markdown("""
 @st.cache_data(ttl=3600)
 def fetch_yf_all_data(tickers, end_date):
     all_tickers = list(tickers) + ["^JKSE"]
-    extended_start = end_date - timedelta(days=120)
+    # ── BACKTEST FIX 1: Lookback 200 hari agar MA50 & BB50 akurat sejak hari pertama ──
+    extended_start = end_date - timedelta(days=200)
+    # ── BACKTEST FIX 2: yfinance `end` bersifat eksklusif, tambah +1 hari agar
+    #    data tanggal end_date benar-benar masuk. Jika end_date = hari ini,
+    #    +1 hari tidak masalah karena data future tidak tersedia. ──
+    end_exclusive = end_date + timedelta(days=1)
     try:
-        df = yf.download(all_tickers, start=extended_start, end=end_date,
+        df = yf.download(all_tickers, start=extended_start, end=end_exclusive,
                          threads=True, progress=False)
+        if df.empty:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        # ── BACKTEST FIX 3: Potong data agar tidak ada candle setelah end_date ──
+        # Konversi end_date ke Timestamp untuk perbandingan index
+        end_ts = pd.Timestamp(end_date)
+        df = df[df.index <= end_ts]
         if df.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex):
@@ -1225,21 +1233,108 @@ def style_visual_chart(val):
 # 5g. PLOTLY CANDLESTICK CHART — B2
 # ─────────────────────────────────────────────
 
-@st.cache_data(ttl=1800)
-def fetch_ohlcv_for_plotly(ticker_jk: str, days: int = 90):
-    """Fetch OHLCV data untuk Plotly chart."""
+@st.cache_data(ttl=60)   # refresh setiap 1 menit
+def fetch_live_signals(ticker_jk: str, end_date=None):
+    """Ambil data untuk Live Signal Panel.
+    BACKTEST FIX: jika end_date diisi, data dipotong s.d. tanggal tersebut.
+    """
     try:
-        df = yf.download(ticker_jk, period=f"{days}d", progress=False, auto_adjust=True)
+        if end_date is not None:
+            start = pd.Timestamp(end_date) - timedelta(days=90)
+            end_excl = pd.Timestamp(end_date) + timedelta(days=1)
+            df = yf.download(ticker_jk, start=start, end=end_excl, progress=False, auto_adjust=True)
+            if not df.empty:
+                df = df[df.index <= pd.Timestamp(end_date)]
+        else:
+            df = yf.download(ticker_jk, period="60d", progress=False, auto_adjust=True)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df
+    except Exception:
+        return None
+
+
+def show_live_signal_panel(ticker_code: str, end_date=None):
+    """Tampilkan panel sinyal live. BACKTEST FIX: data dipotong s.d. end_date jika diisi."""
+    df = fetch_live_signals(ticker_code + ".JK", end_date=end_date)
+    if df is None or df.empty:
+        return
+    c = df['Close']
+    h = df['High']
+    l = df['Low']
+    v = df['Volume']
+    o = df['Open']
+
+    # Flatten jika masih MultiIndex
+    def _s1(s):
+        return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
+
+    c, h, l, v, o = _s1(c), _s1(h), _s1(l), _s1(v), _s1(o)
+
+    ma20 = float(c.rolling(20).mean().iloc[-1])
+    last_price = float(c.iloc[-1])
+
+    # Hitung ulang semua sinyal live
+    candle        = detect_candlestick_pattern(o, h, l, c)
+    vol_climax    = detect_volume_climax(v)
+    consol_bo     = detect_consolidation_breakout(c)
+    slope         = compute_trendline_slope(c)
+    bb_squeeze_lbl, bb_width = detect_bb_squeeze(c)
+    obv           = compute_obv_trend(c, v)
+    vol_trend     = compute_vol_trend_ratio(v)
+    tightness     = compute_price_tightness(c)
+
+    st.markdown("#### 📡 Live Signal (diperbarui tiap 1 menit)")
+    cols = st.columns(4)
+    cols[0].metric("Candlestick",  candle or "-")
+    cols[1].metric("Trendline",    slope)
+    cols[2].metric("BB Squeeze",   bb_squeeze_lbl)
+    cols[3].metric("OBV Trend",    obv)
+
+    cols2 = st.columns(4)
+    cols2[0].metric("Vol Climax",      "✅ Ya" if vol_climax else "—")
+    cols2[1].metric("Consol Breakout", "✅ Ya" if consol_bo else "—")
+    cols2[2].metric("Vol Trend Ratio", f"{vol_trend:.2f}x")
+    cols2[3].metric(
+        "Harga vs MA20",
+        f"{'✅ Di atas' if last_price >= ma20 else '❌ Di bawah'} ({((last_price - ma20) / ma20 * 100):+.1f}%)"
+    )
+
+    # Visual Chart Analysis live
+    visual = compute_visual_chart_analysis(o, h, l, c, v)
+    st.info(f"🔍 **Visual Chart Analysis Live:** {visual}")
+    st.caption(
+        f"⏱️ Data: {df.index[-1].strftime('%Y-%m-%d')} | "
+        f"Refresh otomatis tiap 1 menit"
+    )
+
+
+@st.cache_data(ttl=300)
+def fetch_ohlcv_for_plotly(ticker_jk: str, end_date=None, days: int = 120):
+    """Fetch OHLCV data untuk Plotly chart.
+    BACKTEST FIX: pakai end_date agar chart tidak menampilkan data setelah tanggal backtest.
+    """
+    try:
+        if end_date is not None:
+            start = pd.Timestamp(end_date) - timedelta(days=days + 60)
+            end_exclusive = pd.Timestamp(end_date) + timedelta(days=1)
+            df = yf.download(ticker_jk, start=start, end=end_exclusive,
+                             progress=False, auto_adjust=True)
+            if not df.empty:
+                df = df[df.index <= pd.Timestamp(end_date)]
+        else:
+            df = yf.download(ticker_jk, period=f"{days}d", progress=False, auto_adjust=True)
         if df.empty:
             return None
         df.index = pd.to_datetime(df.index)
-        # Flatten MultiIndex columns jika ada
+        df = df.tail(days)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df[['Open','High','Low','Close','Volume']].copy()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA50'] = df['Close'].rolling(50).mean()
-        # Support & Resistance dari high/low 20D rolling
         df['Resist20'] = df['High'].rolling(20).max()
         df['Support20'] = df['Low'].rolling(20).min()
         return df
@@ -1247,13 +1342,23 @@ def fetch_ohlcv_for_plotly(ticker_jk: str, days: int = 90):
         return None
 
 
-def show_plotly_candlestick(ticker_code: str, chart_key: str = "plotly_chart"):
+def show_plotly_candlestick(ticker_code: str, chart_key: str = "plotly_chart", end_date=None):
     """
     Tampilkan Plotly candlestick chart interaktif dengan MA, Volume, Support/Resistance.
     """
     ticker_jk = ticker_code + ".JK"
+
+    # ── Refresh button + timestamp ──
+    col_refresh, col_ts = st.columns([1, 3])
+    with col_refresh:
+        if st.button("🔄 Refresh Data", key=f"refresh_{chart_key}"):
+            st.cache_data.clear()
+            st.rerun()
+    with col_ts:
+        st.caption(f"Data terakhir diambil: {pd.Timestamp.now().strftime('%H:%M:%S')}")
+
     with st.spinner(f"Memuat chart Plotly untuk {ticker_code}…"):
-        df = fetch_ohlcv_for_plotly(ticker_jk)
+        df = fetch_ohlcv_for_plotly(ticker_jk, end_date=end_date)
 
     if df is None or df.empty:
         st.warning(f"Data OHLCV tidak tersedia untuk {ticker_code}.")
@@ -1368,6 +1473,10 @@ def show_plotly_candlestick(ticker_code: str, chart_key: str = "plotly_chart"):
         c2b.metric("Support 20D",    f"Rp {sr['support']:,.0f}",
                    f"-{sr['dist_support_pct']:.1f}% dari harga")
 
+    # ── Live Signal Panel (data TTL 1 menit) ──
+    st.markdown("---")
+    show_live_signal_panel(ticker_code, end_date=end_date)
+
 
 # ─────────────────────────────────────────────
 # 6. FUNGSI ANALISA UTAMA v16
@@ -1426,20 +1535,23 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_o, df_ref, min_vol_lot,
                 break
 
         # ── RSI ──
-        rsi_series = pta.rsi(close=c, length=14)
+        rsi_series = ta.momentum.RSIIndicator(close=c, window=14).rsi()
         last_rsi = float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else 50.0
 
         # ── ADX + DI+ / DI- ──
-        adx_df = pta.adx(high=h, low=l, close=c, length=14)
-        if adx_df is not None and not adx_df.empty:
-            last_adx  = float(adx_df['ADX_14'].iloc[-1])
-            last_dmp  = float(adx_df['DMP_14'].iloc[-1])
-            last_dmn  = float(adx_df['DMN_14'].iloc[-1])
+        try:
+            _adx_ind  = ta.trend.ADXIndicator(high=h, low=l, close=c, window=14)
+            _adx_vals = _adx_ind.adx()
+            _dmp_vals = _adx_ind.adx_pos()
+            _dmn_vals = _adx_ind.adx_neg()
+            last_adx  = float(_adx_vals.iloc[-1])
+            last_dmp  = float(_dmp_vals.iloc[-1])
+            last_dmn  = float(_dmn_vals.iloc[-1])
 
             adx_direction  = "Bullish (DI+>DI-)" if last_dmp > last_dmn else "Bearish (DI->DI+)"
             is_adx_bullish = last_dmp > last_dmn
 
-            adx_prev3 = adx_df['ADX_14'].iloc[-4:-1].mean()
+            adx_prev3 = float(_adx_vals.iloc[-4:-1].mean())
             if last_adx > adx_prev3 + 0.5:
                 adx_trend = "Rising"
             elif last_adx < adx_prev3 - 0.5:
@@ -1451,7 +1563,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_o, df_ref, min_vol_lot,
             elif last_adx >= 25: adx_strength = "Strong"
             elif last_adx >= 20: adx_strength = "Moderate"
             else:                adx_strength = "Weak"
-        else:
+        except Exception:
             last_adx = last_dmp = last_dmn = 0.0
             adx_direction = adx_trend = adx_strength = "N/A"
             is_adx_bullish = False
@@ -1681,7 +1793,7 @@ CHART_LABELS = [
     "Sideways / Konsolidasi",
 ]
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=300)
 def screenshot_yahoo_chart(ticker_jk: str) -> bytes | None:
     try:
         from playwright.sync_api import sync_playwright
@@ -1710,10 +1822,18 @@ def screenshot_yahoo_chart(ticker_jk: str) -> bytes | None:
         return None
 
 
-@st.cache_data(ttl=1800)
-def fetch_ohlcv_summary(ticker_jk: str) -> str:
+@st.cache_data(ttl=300)
+def fetch_ohlcv_summary(ticker_jk: str, end_date=None) -> str:
+    """BACKTEST FIX: jika end_date diisi, data dipotong s.d. tanggal tersebut."""
     try:
-        df = yf.download(ticker_jk, period="90d", progress=False, auto_adjust=True)
+        if end_date is not None:
+            start = pd.Timestamp(end_date) - timedelta(days=150)
+            end_excl = pd.Timestamp(end_date) + timedelta(days=1)
+            df = yf.download(ticker_jk, start=start, end=end_excl, progress=False, auto_adjust=True)
+            if not df.empty:
+                df = df[df.index <= pd.Timestamp(end_date)]
+        else:
+            df = yf.download(ticker_jk, period="90d", progress=False, auto_adjust=True)
         if df.empty:
             return "Data OHLCV tidak tersedia."
         df = df.tail(60)
@@ -1749,9 +1869,9 @@ def fetch_ohlcv_summary(ticker_jk: str) -> str:
         return f"Error fetch OHLCV: {e}"
 
 
-def ai_chart_analysis(ticker_code: str) -> dict:
+def ai_chart_analysis(ticker_code: str, end_date=None) -> dict:
     ticker_jk = ticker_code + ".JK"
-    ohlcv_text = fetch_ohlcv_summary(ticker_jk)
+    ohlcv_text = fetch_ohlcv_summary(ticker_jk, end_date=end_date)
     png_bytes = screenshot_yahoo_chart(ticker_jk)
     has_screenshot = png_bytes is not None
 
@@ -1814,7 +1934,13 @@ def ai_chart_analysis(ticker_code: str) -> dict:
 # ─────────────────────────────────────────────
 # 7. SIDEBAR
 # ─────────────────────────────────────────────
-st.sidebar.header("⚙️ Konfigurasi v16")
+st.sidebar.header("⚙️ Konfigurasi v23")
+
+# ── AUTO-REFRESH SAAT MARKET BUKA ──
+import time as _time
+_today_date = date.today()
+# Auto-refresh hanya aktif jika tanggal analisa = hari ini (bukan backtest)
+_enable_autorefresh_ui = st.sidebar.checkbox("🔄 Auto-refresh saat market buka (tiap 5 menit)", value=False)
 
 target_list = sorted(df_emiten['Kode Saham'].unique().tolist())
 selected_tickers = st.sidebar.multiselect(
@@ -1879,12 +2005,33 @@ show_composite_rank = st.sidebar.checkbox("Tampilkan Composite Explosive Rank", 
 
 today = date.today()
 end_d = st.sidebar.date_input("📅 Analisa per tanggal", today)
-st.sidebar.caption("ℹ️ Data historis otomatis diambil 120 hari ke belakang untuk keakuratan indikator.")
+st.sidebar.caption("ℹ️ Data historis diambil 200 hari ke belakang untuk keakuratan MA50, BB, dan ADX.")
+
+# ── Backtest mode detection ──
+IS_BACKTEST = (end_d < today)
+if IS_BACKTEST:
+    st.sidebar.warning(f"⏪ MODE BACKTEST: data s.d. **{end_d.strftime('%d %b %Y')}**")
+else:
+    # Auto-refresh hanya aktif saat mode live (bukan backtest)
+    if _enable_autorefresh_ui:
+        now = pd.Timestamp.now(tz="Asia/Jakarta")
+        is_market_open = (
+            now.weekday() < 5 and
+            (9 <= now.hour < 16) and
+            not (now.hour == 12 and now.minute < 60 and now.hour < 13)
+        )
+        if is_market_open:
+            st.sidebar.success("🟢 Market sedang buka — auto-refresh aktif")
+            _time.sleep(300)
+            st.cache_data.clear()
+            st.rerun()
+        else:
+            st.sidebar.info("🔴 Market tutup — auto-refresh tidak aktif")
 
 # ── SIDEBAR BROKER SUMMARY (v20) ──
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 v20: Broker Summary Analysis")
-enable_broker = st.sidebar.checkbox("Aktifkan Broker Summary Analysis", value=True)
+enable_broker = st.sidebar.checkbox("Aktifkan Broker Summary Analysis", value=False)
 
 broker_mode = st.sidebar.radio(
     "Mode Data Broker",
@@ -2137,6 +2284,26 @@ if btn_analisa:
             else:
                 moonstock_list = []
 
+            # ── COIL WATCH: Pola "Pegas Terkompresi" ──
+            if not df_res.empty:
+                coil_mask = (
+                    (df_res['Silent Score'] >= 7) &
+                    (df_res['Composite Rank'] >= 8) &
+                    (df_res['ADX (14)'] > 50) &
+                    (df_res['ADX Direction'].str.contains('Bullish', na=False)) &
+                    (df_res['OBV Trend'].str.contains('Rising', na=False)) &
+                    (df_res['Price Tightness (%)'] < 3.0) &
+                    (df_res['Dist to 20D High (%)'].between(-8, 0))
+                )
+                df_coil_raw = df_res[coil_mask].copy()
+                df_coil_raw['Entry Readiness Score'] = df_coil_raw.apply(calc_entry_readiness, axis=1)
+                df_coil_raw['Entry Readiness'] = df_coil_raw['Entry Readiness Score'].apply(entry_readiness_label)
+                df_coil_raw = df_coil_raw.sort_values(['Entry Readiness Score', 'Composite Rank'], ascending=[False, False])
+                coil_list = df_coil_raw['Kode Saham'].tolist()
+            else:
+                df_coil_raw = pd.DataFrame()
+                coil_list = []
+
             # Re-apply filter setelah kolom broker ditambahkan
             if not df_res.empty:
                 mask = (
@@ -2167,6 +2334,8 @@ if btn_analisa:
                 "df_res_filtered":  df_res_filtered,
                 "broker_scores":    broker_scores,
                 "moonstock_list":   moonstock_list,
+                "coil_list":        coil_list,
+                "end_d":            end_d,  # simpan untuk banner & chart backtest
             }
             st.session_state.tv_ticker = None  # reset pilihan chart saat analisa baru
 
@@ -2183,6 +2352,22 @@ if st.session_state.analisa_hasil is not None:
     df_res_filtered  = _h["df_res_filtered"]
     broker_scores    = _h.get("broker_scores", {})
     moonstock_list   = _h.get("moonstock_list", [])
+    coil_list        = _h.get("coil_list", [])
+    # Ambil end_date dari session_state agar banner & chart konsisten meski sidebar berubah
+    _end_d_render    = _h.get("end_d", end_d)
+
+    # ── Tambahkan Entry Readiness ke df_res untuk Semua Analisa ──
+    if not df_res.empty:
+        df_res['Entry Readiness Score'] = df_res.apply(calc_entry_readiness, axis=1)
+        df_res['Entry Readiness'] = df_res['Entry Readiness Score'].apply(entry_readiness_label)
+
+    # ── BACKTEST MODE BANNER ──
+    if _end_d_render < date.today():
+        st.warning(
+            f"⏪ **MODE BACKTEST** — Seluruh analisa (indikator, chart, Live Signal) "
+            f"dihitung dari data historis s.d. **{_end_d_render.strftime('%d %B %Y')}**. "
+            f"Data setelah tanggal ini tidak digunakan sama sekali."
+        )
 
     # ── Upload CSV broker (mode manual, di luar tombol analisa) ──
     if enable_broker and "Upload CSV" in broker_mode:
@@ -2238,6 +2423,7 @@ if st.session_state.analisa_hasil is not None:
             "🔥 Shortlist Utama",
             "🔭 Pre-Breakout Watch (Opsi A)",
             "🕵️ Silent Accumulation (v18)",
+            "🌀 Coil Watch (v23)",
             "🔍 Semua Hasil Analisa",
         ]
         if has_broker_data:
@@ -2247,8 +2433,9 @@ if st.session_state.analisa_hasil is not None:
         tab1 = tabs[0]
         tab2 = tabs[1]
         tab3 = tabs[2]
-        tab4 = tabs[3]
-        tab5 = tabs[4] if has_broker_data else None
+        tab_coil = tabs[3]
+        tab4 = tabs[4]
+        tab5 = tabs[5] if has_broker_data else None
 
         # ═══════════════════════════════════════
         # TAB 1: SHORTLIST UTAMA
@@ -2283,7 +2470,7 @@ if st.session_state.analisa_hasil is not None:
                         key="chart_mode_tab1", horizontal=True
                     )
                     if "Plotly" in chart_mode_s:
-                        show_plotly_candlestick(selected_tv_s, chart_key=f"plotly_tab1_{selected_tv_s}")
+                        show_plotly_candlestick(selected_tv_s, chart_key=f"plotly_tab1_{selected_tv_s}", end_date=_end_d_render)
                     else:
                         show_tradingview_widget(selected_tv_s)
 
@@ -2363,7 +2550,7 @@ if st.session_state.analisa_hasil is not None:
                             key="chart_mode_tab2", horizontal=True
                         )
                         if "Plotly" in chart_mode_w:
-                            show_plotly_candlestick(selected_tv_w, chart_key=f"plotly_tab2_{selected_tv_w}")
+                            show_plotly_candlestick(selected_tv_w, chart_key=f"plotly_tab2_{selected_tv_w}", end_date=_end_d_render)
                         else:
                             show_tradingview_widget(selected_tv_w)
 
@@ -2507,7 +2694,7 @@ if st.session_state.analisa_hasil is not None:
                             key="chart_mode_tab3", horizontal=True
                         )
                         if "Plotly" in chart_mode_si:
-                            show_plotly_candlestick(selected_tv_si, chart_key=f"plotly_tab3_{selected_tv_si}")
+                            show_plotly_candlestick(selected_tv_si, chart_key=f"plotly_tab3_{selected_tv_si}", end_date=_end_d_render)
                         else:
                             show_tradingview_widget(selected_tv_si)
 
@@ -2568,13 +2755,182 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
                     )
 
         # ═══════════════════════════════════════
+        # TAB COIL WATCH (v23)
+        # ═══════════════════════════════════════
+        with tab_coil:
+            st.subheader("🌀 Coil Watch — Pegas Terkompresi (v23)")
+            st.markdown("""
+> **Filosofi:** Menangkap saham seperti **BSBK** — ADX sangat kuat, harga sideways sangat ketat,
+> OBV naik diam-diam, tapi belum breakout. Kombinasi ini adalah **"energi terkompresi"** yang
+> sewaktu-waktu bisa meledak. Tab ini memfilter kandidat terbaik dari Silent Accumulation
+> dan menambahkan **Entry Readiness** untuk membantu timing entry.
+>
+> 🎯 **Cara pakai:** Pantau saham dengan Entry Readiness 🟢 setiap hari. Entry saat salah satu
+> trigger muncul: Volume Spike (>2x), MFI Lonjak (>15 dalam 5 hari), atau Breakout resistance.
+""")
+
+            # Rebuild df_coil dari df_res (fresh, pakai data yang sudah ada di session_state)
+            if not df_res.empty:
+                coil_mask = (
+                    (df_res['Silent Score'] >= 7) &
+                    (df_res['Composite Rank'] >= 8) &
+                    (df_res['ADX (14)'] > 50) &
+                    (df_res['ADX Direction'].str.contains('Bullish', na=False)) &
+                    (df_res['OBV Trend'].str.contains('Rising', na=False)) &
+                    (df_res['Price Tightness (%)'] < 3.0) &
+                    (df_res['Dist to 20D High (%)'].between(-8, 0))
+                )
+                # Apply price & float filter dari sidebar
+                coil_mask &= (df_res['Last Price'] >= min_p) & (df_res['Last Price'] <= max_p)
+                coil_mask &= (df_res['Free Float (%)'] <= max_ff)
+                df_coil = df_res[coil_mask].copy()
+                if not df_coil.empty:
+                    df_coil['Entry Readiness Score'] = df_coil.apply(calc_entry_readiness, axis=1)
+                    df_coil['Entry Readiness'] = df_coil['Entry Readiness Score'].apply(entry_readiness_label)
+                    df_coil = df_coil.sort_values(['Entry Readiness Score', 'Composite Rank'], ascending=[False, False])
+            else:
+                df_coil = pd.DataFrame()
+
+            if not df_coil.empty:
+                coil_cols = [
+                    'Kode Saham', 'Last Price', 'Entry Readiness', 'Entry Readiness Score',
+                    'Composite Rank', 'Silent Score',
+                    'ADX (14)', 'ADX Direction', 'ADX Trend', 'ADX Strength',
+                    'Price Tightness (%)', 'Dist to 20D High (%)',
+                    'OBV Trend', 'Vol Trend Ratio', 'Rel Vol (20D)',
+                    'MFI (14D)', 'MFI Change 5D', 'RSI (14)',
+                    'BB Squeeze', 'BB Width (%)',
+                    'Free Float (%)', 'AvgVol20 (Lot)',
+                    'Above MA20', 'Market RS',
+                    'Chart Analysis', 'Visual Chart Analysis',
+                ]
+                cols_coil = [c for c in coil_cols if c in df_coil.columns]
+
+                def apply_coil_style(df_styled):
+                    styled = (df_styled
+                        .map(style_entry_readiness, subset=['Entry Readiness Score'])
+                        .map(style_silent_score,    subset=['Silent Score'])
+                        .map(style_composite_rank,  subset=['Composite Rank'])
+                        .map(style_bb_squeeze,      subset=['BB Squeeze'])
+                        .map(style_obv_trend,       subset=['OBV Trend'])
+                        .map(style_mfi,             subset=['MFI (14D)'])
+                        .map(style_adx_trend,       subset=['ADX Trend'])
+                        .map(style_adx_dir,         subset=['ADX Direction'])
+                        .map(style_market_rs,       subset=['Market RS'])
+                        .map(style_ma_filter,       subset=['Above MA20'])
+                        .map(style_chart_analysis,  subset=['Chart Analysis'])
+                        .format({
+                            'Free Float (%)':       '{:.1f}%',
+                            'MFI (14D)':            '{:.1f}',
+                            'MFI Change 5D':        '{:+.1f}',
+                            'RSI (14)':             '{:.1f}',
+                            'ADX (14)':             '{:.1f}',
+                            'BB Width (%)':         '{:.2f}%',
+                            'Vol Trend Ratio':      '{:.2f}x',
+                            'Price Tightness (%)':  '{:.2f}%',
+                            'Dist to 20D High (%)': '{:.2f}%',
+                            'Rel Vol (20D)':        '{:.2f}x',
+                        }, na_rep="-")
+                    )
+                    return styled
+
+                st.dataframe(
+                    apply_coil_style(df_coil[cols_coil].style),
+                    use_container_width=True,
+                    height=420,
+                )
+
+                # ── Ringkasan per kandidat ──
+                st.markdown("#### 📋 Status Entry Readiness")
+                for _, row in df_coil.iterrows():
+                    er    = int(row.get('Entry Readiness Score', 0))
+                    er_lbl = row.get('Entry Readiness', '⚪ Belum')
+                    cr    = int(row.get('Composite Rank', 0))
+                    sc    = int(row.get('Silent Score', 0))
+                    pt    = float(row.get('Price Tightness (%)', 0))
+                    adx   = float(row.get('ADX (14)', 0))
+                    dist  = float(row.get('Dist to 20D High (%)', 0))
+                    rv    = float(row.get('Rel Vol (20D)', 0))
+                    mfi_c = float(row.get('MFI Change 5D', 0))
+
+                    # Trigger breakdown
+                    triggers = []
+                    if rv > 2.0:    triggers.append(f"✅ Vol Spike ({rv:.1f}x)")
+                    else:           triggers.append(f"⬜ Vol ({rv:.1f}x, butuh >2x)")
+                    if mfi_c > 15:  triggers.append(f"✅ MFI Lonjak (+{mfi_c:.1f})")
+                    else:           triggers.append(f"⬜ MFI Change (+{mfi_c:.1f}, butuh >15)")
+                    if dist > -1.0: triggers.append(f"✅ Dekat/Breakout ({dist:.1f}%)")
+                    else:           triggers.append(f"⬜ Dist to Resist ({dist:.1f}%, butuh >-1%)")
+
+                    st.markdown(
+                        f"**{row['Kode Saham']}** | Rp {row['Last Price']:,} | "
+                        f"{er_lbl} ({er}/3 trigger) | "
+                        f"Composite: **{cr}** | Silent: **{sc}** | "
+                        f"ADX: {adx:.0f} | Tightness: {pt:.1f}%"
+                    )
+                    st.caption(" &nbsp;|&nbsp; ".join(triggers))
+                    st.divider()
+
+                # ── Chart ──
+                st.markdown("#### 📈 Chart")
+                ticker_list_coil = df_coil['Kode Saham'].tolist()
+                default_idx_coil = ticker_list_coil.index(st.session_state.tv_ticker)                     if st.session_state.tv_ticker in ticker_list_coil else 0
+                selected_tv_coil = st.selectbox(
+                    "🔍 Pilih saham:", ticker_list_coil,
+                    index=default_idx_coil, key="tv_select_coil"
+                )
+                if selected_tv_coil:
+                    st.session_state.tv_ticker = selected_tv_coil
+                    chart_mode_coil = st.radio(
+                        "Mode Chart:", ["📊 Plotly Candlestick (Interaktif)", "📈 TradingView Widget"],
+                        key="chart_mode_coil", horizontal=True
+                    )
+                    if "Plotly" in chart_mode_coil:
+                        show_plotly_candlestick(selected_tv_coil, chart_key=f"plotly_coil_{selected_tv_coil}", end_date=_end_d_render)
+                    else:
+                        show_tradingview_widget(selected_tv_coil)
+
+                # ── Penjelasan ──
+                with st.expander("📖 Cara Baca Coil Watch & Entry Readiness"):
+                    st.markdown("""
+**Coil Watch** — Saham yang memenuhi SEMUA kriteria berikut:
+| Kriteria | Threshold | Arti |
+|---|---|---|
+| Silent Score | ≥ 7 | Akumulasi diam-diam sangat terdeteksi |
+| Composite Rank | ≥ 8 | Skor gabungan tinggi |
+| ADX | > 50 + Bullish | Tren kuat tersembunyi — paradoks dengan sideways |
+| OBV | Rising ↑ | Volume beli masuk diam-diam secara kumulatif |
+| Price Tightness | < 3% | Harga bergerak sangat sempit = pegas ditekan |
+| Dist to Resistance | -8% s.d. 0% | Dekat resistance, tinggal sedikit trigger |
+
+**Entry Readiness Score (0–3)** — Trigger nyata yang sudah muncul:
+| Trigger | Kondisi | Arti |
+|---|---|---|
+| ✅ Volume Spike | Rel Vol > 2x | Uang besar masuk tiba-tiba — ini yang paling kuat |
+| ✅ MFI Lonjak | MFI Change 5D > 15 | Tekanan beli masif dalam 5 hari terakhir |
+| ✅ Breakout | Dist to Resist > -1% | Sudah atau hampir tembus resistance 20 hari |
+
+**Interpretasi:**
+- 🟢 **SIAP ENTRY (3/3)** — Semua trigger muncul. Konfirmasi dengan chart, lalu entry
+- 🟡 **Hampir Siap (2/3)** — Pantau harian, alert di harga resistance
+- 🟠 **Tunggu (1/3)** — Masuk watchlist, review tiap 2–3 hari
+- ⚪ **Belum (0/3)** — Saham coil tapi belum ada trigger. Sabar
+""")
+            else:
+                st.info(
+                    "Tidak ada kandidat Coil Watch saat ini. "
+                    "Kriteria: Silent Score ≥ 7 + Composite Rank ≥ 8 + ADX > 50 Bullish + "
+                    "OBV Rising + Price Tightness < 3% + Dist to Resist antara -8% s.d. 0%."
+                )
+
+        # ═══════════════════════════════════════
         # TAB 4: SEMUA HASIL ANALISA
         # ═══════════════════════════════════════
         with tab4:
             st.subheader("🔍 Seluruh Hasil Analisa")
 
             # Sort option
-            sort_options = ['Composite Rank', 'Early Momentum Score', 'Silent Score', 'MFI Change 5D', 'MFI (14D)', 'Rel Vol (20D)', 'ADX (14)']
+            sort_options = ['Entry Readiness Score', 'Composite Rank', 'Early Momentum Score', 'Silent Score', 'MFI Change 5D', 'MFI (14D)', 'Rel Vol (20D)', 'ADX (14)']
             sort_col = st.selectbox(
                 "Urutkan berdasarkan:",
                 options=sort_options,
@@ -2614,7 +2970,7 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
                         key="chart_mode_tab4", horizontal=True
                     )
                     if "Plotly" in chart_mode_all:
-                        show_plotly_candlestick(selected_tv_all, chart_key=f"plotly_tab4_{selected_tv_all}")
+                        show_plotly_candlestick(selected_tv_all, chart_key=f"plotly_tab4_{selected_tv_all}", end_date=_end_d_render)
                     else:
                         show_tradingview_widget(selected_tv_all)
             else:
@@ -2713,7 +3069,7 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
                                     key=f"chart_mode_moon_{ticker}", horizontal=True
                                 )
                                 if "Plotly" in chart_mode_moon:
-                                    show_plotly_candlestick(ticker, chart_key=f"plotly_moon_{ticker}")
+                                    show_plotly_candlestick(ticker, chart_key=f"plotly_moon_{ticker}", end_date=_end_d_render)
                                 else:
                                     show_tradingview_widget(ticker)
 
@@ -2785,7 +3141,7 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
             # Tombol diklik → jalankan analisa, simpan ke session_state
             if run_ai and selected_for_ai:
                 with st.spinner(f"Claude sedang analisa chart {selected_for_ai}…"):
-                    result   = ai_chart_analysis(selected_for_ai)
+                    result   = ai_chart_analysis(selected_for_ai, end_date=_end_d_render)
                     png_bytes = screenshot_yahoo_chart(selected_for_ai + ".JK")
                 st.session_state.ai_results[selected_for_ai]    = result
                 st.session_state.ai_screenshot[selected_for_ai] = png_bytes
@@ -2807,7 +3163,8 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
                 )
                 st.markdown(f"**Analisa:** {reason}")
 
-                src_note = "📸 Screenshot Yahoo Finance + data OHLCV" if has_ss else "📊 Data OHLCV saja (screenshot gagal)"
+                bt_note  = f" [Backtest: s.d. {_end_d_render.strftime('%d %b %Y')}]" if _end_d_render < date.today() else ""
+                src_note = ("📸 Screenshot Yahoo Finance + data OHLCV" if has_ss else "📊 Data OHLCV saja (screenshot gagal)") + bt_note
                 st.caption(
                     f"Sumber: {src_note} · "
                     f"[Lihat chart Yahoo Finance ↗](https://finance.yahoo.com/quote/{selected_for_ai}.JK/)"
@@ -2848,7 +3205,7 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
                 df_all.to_excel(writer, index=False, sheet_name='Semua Analisa')
             return output.getvalue()
 
-        def to_excel_report_v20(df_short, df_watch, df_silent, df_all, df_moon=None):
+        def to_excel_report_v23(df_short, df_watch, df_silent, df_coil, df_all, df_moon=None):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_short.to_excel(writer, index=False, sheet_name='Shortlist')
@@ -2856,17 +3213,28 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
                     df_watch.to_excel(writer, index=False, sheet_name='Pre-Breakout Watch')
                 if not df_silent.empty:
                     df_silent.to_excel(writer, index=False, sheet_name='Silent Accumulation')
+                if not df_coil.empty:
+                    df_coil.to_excel(writer, index=False, sheet_name='Coil Watch')
                 if df_moon is not None and not df_moon.empty:
                     df_moon.to_excel(writer, index=False, sheet_name='Moonstock Radar')
                 df_all.to_excel(writer, index=False, sheet_name='Semua Analisa')
             return output.getvalue()
 
         df_moon_dl = df_res[df_res['Kode Saham'].isin(moonstock_list)] if moonstock_list and not df_res.empty else pd.DataFrame()
-        excel_data = to_excel_report_v20(df_s_dl, df_w_dl, df_si_dl, df_res_filtered, df_moon_dl)
+        # Coil Watch download dataframe
+        if not df_res.empty and coil_list:
+            df_coil_dl = df_res[df_res['Kode Saham'].isin(coil_list)].copy()
+            if 'Entry Readiness Score' not in df_coil_dl.columns:
+                df_coil_dl['Entry Readiness Score'] = df_coil_dl.apply(calc_entry_readiness, axis=1)
+                df_coil_dl['Entry Readiness'] = df_coil_dl['Entry Readiness Score'].apply(entry_readiness_label)
+            df_coil_dl = df_coil_dl.sort_values(['Entry Readiness Score', 'Composite Rank'], ascending=[False, False])
+        else:
+            df_coil_dl = pd.DataFrame()
+        excel_data = to_excel_report_v23(df_s_dl, df_w_dl, df_si_dl, df_coil_dl, df_res, df_moon_dl)
         st.sidebar.download_button(
-            label="📥 Download Report Excel v20",
+            label="📥 Download Report Excel v23",
             data=excel_data,
-            file_name=f"Analisa_BEI_{date.today()}_v20.xlsx",
+            file_name=f"Analisa_BEI_{date.today()}_v23.xlsx",
             mime="application/vnd.ms-excel"
         )
 
@@ -2923,9 +3291,10 @@ Jangan beli hanya dari skor ini. Tunggu salah satu dari: candle bullish kuat + v
 else:
     st.info(
         f"📂 Database: **{loaded_file}**\n\n"
-        "**Perubahan utama v20:**\n"
-        "- 🆕 **Broker Summary Analysis**: Smart Money vs Retail tracking berdasarkan data RTI Business\n"
-        "- 🆕 **Broker Score 0–10**: Net buy smart money, rasio asing, pola distribusi broker\n"
-        "- 🆕 **Tab Moonstock Radar**: Gabungan 5 kriteria — Broker + Early Momentum + Silent + MA20 + Market RS\n"
-        "- ✅ Semua fitur v19 dipertahankan (Visual Chart Analysis, Plotly Candlestick, Silent Accumulation, AI Chart Analysis)"
+        "**Perubahan utama v21:**\n"
+        "- 🆕 **Cache TTL 5 menit**: Data chart & OHLCV diperbarui setiap 5 menit\n"
+        "- 🆕 **Live Signal Panel**: Sinyal teknikal dihitung ulang tiap 1 menit di bawah setiap chart\n"
+        "- 🆕 **Tombol 🔄 Refresh Data**: Per saham, langsung clear cache & reload data terbaru\n"
+        "- 🆕 **Auto-refresh saat market buka**: Opsional, tiap 5 menit (aktifkan di sidebar)\n"
+        "- ✅ Semua fitur v20 dipertahankan (Broker Summary, Moonstock Radar, Visual Chart Analysis, Silent Accumulation, AI Chart Analysis)"
     )
