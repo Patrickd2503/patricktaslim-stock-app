@@ -1,8 +1,9 @@
 streamlit
 yfinance
 pandas
-pandas_ta
-openpyxl
-xlsxwriter
-matplotlib
+numpy
+ta
+requests
 plotly
+xlsxwriter
+openpyxl
