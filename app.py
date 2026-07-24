@@ -4073,15 +4073,21 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_o, df_ref, min_vol_lot,
             and obv_trend_label == "Rising ↑"
         )
 
-        shortlist_entry_path = ""
-        if jalur1_ok and jalur2_ok:
-            shortlist_entry_path = "Momentum + Wyckoff"
-        elif jalur1_ok:
-            shortlist_entry_path = "Momentum (SS)"
-        elif jalur2_ok:
-            shortlist_entry_path = "🧲 Wyckoff Accum"
-
         is_shortlist = vol_required and adx_bull_required and (jalur1_ok or jalur2_ok)
+
+        # FIX: "Jalur Masuk" harus konsisten dengan is_shortlist (keanggotaan shortlist
+        # sesungguhnya). Sebelumnya label ini diisi hanya berdasarkan jalur1_ok/jalur2_ok,
+        # tanpa mensyaratkan vol_required & adx_bull_required — akibatnya saham yang TIDAK
+        # lolos shortlist tetap tampil berlabel jalur masuk di sheet "Semua Analisa",
+        # sehingga tidak sinkron dengan kolom "Ada di Shortlist" di file backtest.
+        shortlist_entry_path = ""
+        if is_shortlist:
+            if jalur1_ok and jalur2_ok:
+                shortlist_entry_path = "Momentum + Wyckoff"
+            elif jalur1_ok:
+                shortlist_entry_path = "Momentum (SS)"
+            elif jalur2_ok:
+                shortlist_entry_path = "🧲 Wyckoff Accum"
         # ─────────────────────────────────────────────────────────────────────
 
         if is_shortlist:
