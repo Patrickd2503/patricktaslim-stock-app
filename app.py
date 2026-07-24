@@ -1195,18 +1195,15 @@ def render_broker_upload_widget() -> dict:
 # ─────────────────────────────────────────────
 
 # --- CONFIG DASHBOARD ---
-st.set_page_config(page_title="Monitor Saham BEI v36", layout="wide")
-st.title("📊 Dashboard Akumulasi: Smart Money Monitor v36 – Pre-Explosion Watch")
+st.set_page_config(page_title="Monitor Saham BEI v37", layout="wide")
+st.title("📊 Dashboard Akumulasi: Smart Money Monitor v37 – Pre-Explosion Watch")
 
 st.markdown("""
-**Update v34 — Pre-Explosion Watch (BB Width + Price Tightness + ADX Flat):**
-- 🆕 **Tab Pre-Explosion Watch**: menangkap saham yang "mengisi energi" sebelum pergerakan besar — BB lebar historis + harga ketat + ADX Flat + Above MA20
-- 🆕 **BB Width Pct Rank**: kolom baru (0–1) posisi lebar BB saat ini relatif 50 hari terakhir. ≥0.75 = BB sangat lebar
-- 🆕 **Explosion Score (0–5)**: skor prioritas gabungan BB Width Rank + Price Tightness + OBV + Float + Vol Trend
-- ✅ Semua fitur v33 dipertahankan (Shakeout Agresif, Float Analysis, WAS, Wyckoff Phase Detector, dll)
-- 🆕 **v35: Mode Backtest + Hit Rate** — jalankan screener di tanggal historis lalu bandingkan otomatis dengan Top Gainer di tanggal pembanding untuk mengukur hit rate
-- 🆕 **v36: Analisa per Rentang Tanggal** — pilih 2 tanggal di kalender untuk melihat total Volume/Value/Hari Naik-Turun/Perubahan Harga sepanjang periode tsb (kolom "...Periode" di tabel & Excel)
-- 🆕 **v36: Panel Diagnostik** — expander "🩺 Diagnostik" menunjukkan persis kenapa suatu saham tidak muncul di hasil (data kurang / volume di bawah ambang / gagal fetch dari Yahoo Finance)
+**Update v37 — Shortlist Gemini masuk Excel Export:**
+- 🆕 **Sheet "Shortlist Gemini" di Excel**: hasil filter Gemini-2P/Gemini-7P yang sebelumnya cuma tampil di tab Streamlit, sekarang ikut ter-export sebagai sheet tersendiri di file download
+- ✅ Semua fitur v36 dipertahankan (Analisa per Rentang Tanggal, Panel Diagnostik, dll)
+- ✅ Semua fitur v34 dipertahankan (Pre-Explosion Watch, BB Width Pct Rank, Explosion Score, Shakeout Agresif, Float Analysis, WAS, Wyckoff Phase Detector, dll)
+- ✅ Semua fitur v35 dipertahankan (Mode Backtest + Hit Rate)
 """)
 
 
@@ -7285,7 +7282,7 @@ Nilai positif = ada akumulasi di atas kebiasaan normal. Semakin besar = semakin 
             # Freeze baris header
             worksheet.freeze_panes(1, 0)
 
-        def to_excel_report_v34(df_short, df_watch, df_silent, df_coil, df_expl, df_all, df_moon=None, df_float=None, df_shakeout=None):
+        def to_excel_report_v34(df_short, df_watch, df_silent, df_coil, df_expl, df_all, df_moon=None, df_float=None, df_shakeout=None, df_gemini=None):
             """Export Excel v34 — semua sheet berwarna sesuai tampilan Streamlit."""
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -7304,6 +7301,8 @@ Nilai positif = ada akumulasi di atas kebiasaan normal. Semakin besar = semakin 
                     write_colored_sheet(writer, df_float,  'Float Analysis')
                 if df_shakeout is not None and not df_shakeout.empty:
                     write_colored_sheet(writer, df_shakeout, 'Shakeout Shortlist')
+                if df_gemini is not None and not df_gemini.empty:
+                    write_colored_sheet(writer, df_gemini, 'Shortlist Gemini')
                 write_colored_sheet(writer, df_all,    'Semua Analisa')
             return output.getvalue()
 
@@ -7388,7 +7387,15 @@ Nilai positif = ada akumulasi di atas kebiasaan normal. Semakin besar = semakin 
         else:
             df_shk_dl = pd.DataFrame()
 
-        excel_data = to_excel_report_v34(df_s_dl, df_w_dl, df_si_dl, df_coil_dl, df_expl_dl, df_res, df_moon_dl, df_float_dl, df_shk_dl)
+        # Shortlist Gemini download dataframe (v37 — replika rule Gemini 2P/7P, sama seperti tab Streamlit)
+        if not df_res.empty and gemini_list:
+            df_gemini_dl = df_res[df_res['Kode Saham'].isin(gemini_list)].copy()
+            if 'Gemini Rule Match' in df_gemini_dl.columns:
+                df_gemini_dl = df_gemini_dl.sort_values('Gemini Rule Match', ascending=False)
+        else:
+            df_gemini_dl = pd.DataFrame()
+
+        excel_data = to_excel_report_v34(df_s_dl, df_w_dl, df_si_dl, df_coil_dl, df_expl_dl, df_res, df_moon_dl, df_float_dl, df_shk_dl, df_gemini_dl)
 
         # ── Nama file Excel disertai periode tanggal awal - akhir analisa ──
         _bulan_id = ["Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -7397,9 +7404,9 @@ Nilai positif = ada akumulasi di atas kebiasaan normal. Semakin besar = semakin 
             return f"{_d.day} {_bulan_id[_d.month - 1]} {_d.year}"
         _periode_label = f"{_fmt_tgl_id(start_d)} - {_fmt_tgl_id(end_d)}"
         st.sidebar.download_button(
-            label="📥 Download Report Excel v34",
+            label="📥 Download Report Excel v37",
             data=excel_data,
-            file_name=f"Analisa_BEI_{_periode_label}_v36.xlsx",
+            file_name=f"Analisa_BEI_{_periode_label}_v37.xlsx",
             mime="application/vnd.ms-excel"
         )
 
