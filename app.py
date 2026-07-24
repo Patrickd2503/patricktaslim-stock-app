@@ -3012,7 +3012,7 @@ def compute_composite_rank(
     if 0 < free_float < 20:
         score += 2
         criteria.append(f"Float {free_float:.1f}% (kecil)")
-    elif free_float < 35:
+    elif 0 < free_float < 35:
         score += 1
         criteria.append(f"Float {free_float:.1f}%")
 
