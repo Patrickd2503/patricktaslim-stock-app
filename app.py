@@ -3633,6 +3633,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_o, df_ref, min_vol_lot,
     shortlist_keys = []
     prebreakout_keys = []
     silent_accum_keys = []
+    gemini_shortlist_keys = []   # ── v37: Shortlist Gemini (replika rule Gemini, hard filter apa adanya) ──
     skip_log = []   # ── v35 DEBUG: catat kenapa saham gugur dari hasil ──
     min_vol_lembar = min_vol_lot * 100
     min_vol_silent_lembar = min_vol_silent_lot * 100
@@ -3761,6 +3762,51 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_o, df_ref, min_vol_lot,
 
         # ── Free Float ──
         free_float = float(ff_lookup.get(ticker_name, 0.0))
+
+        # ── v37: SHORTLIST GEMINI — replika PERSIS rule screener Gemini (2P & 7P) ──
+        # Ini SENGAJA dibuat sebagai hard filter apa adanya (bukan skoring bertingkat
+        # seperti shortlist utama), supaya karakter "float kecil + breakout dini" yang
+        # terbukti profitable di screener sederhana tidak ikut ter-encer oleh syarat
+        # tambahan (ADX bullish wajib, threshold skor tinggi, dsb).
+        ma5   = c.rolling(5).mean().iloc[-1]
+        ma50  = c.rolling(50).mean().iloc[-1]
+        vol_ma5  = v.rolling(5).mean().iloc[-1]
+        vol_ma20 = avg_vol20  # sudah dihitung di atas sebagai v.rolling(20).mean()
+        _last_price = c.iloc[-1]
+        _last_vol   = v.iloc[-1]
+
+        _gemini_common_ok = bool(
+            _last_price > 50
+            and vol_ma5 > 50000
+            and ma20 > 0 and ma50 > 0
+            and _last_price <= 1.01 * ma20
+            and ma20 >= 1.0 * ma50
+            and _last_price >= 0.98 * ma50
+        )
+        # Screener "2 Parameter": volume hari ini > 1.2x Volume MA5, Free Float <= 40%
+        gemini2_ok = bool(
+            _gemini_common_ok
+            and _last_vol > 1.2 * vol_ma5
+            and 0 < free_float <= 40
+        )
+        # Screener "7 Parameter": Volume MA5 > Volume MA20, Free Float < 40%,
+        # Price MA5 < Price MA20 (harga baru mulai naik dari bawah MA20)
+        gemini7_ok = bool(
+            _gemini_common_ok
+            and vol_ma5 > 1.0 * vol_ma20
+            and 0 < free_float < 40
+            and ma5 < 1.0 * ma20
+        )
+        is_gemini_shortlist = gemini2_ok or gemini7_ok
+        _gemini_path = []
+        if gemini2_ok:
+            _gemini_path.append("Gemini-2P")
+        if gemini7_ok:
+            _gemini_path.append("Gemini-7P")
+        gemini_rule_match = " + ".join(_gemini_path)
+
+        if is_gemini_shortlist:
+            gemini_shortlist_keys.append(ticker_name)
 
         # ── CHART ANALYSIS ──
         chart_analysis = get_chart_analysis(
@@ -4243,6 +4289,14 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_o, df_ref, min_vol_lot,
             # ── v32: Short-Term Trigger Columns ──
             'Vol Spike Today (x ADV20)': _vol_spike_today,
             'Gap to R1 (%)':             _gap_to_r1_pct,
+            # ── v37: Shortlist Gemini (replika rule screener sederhana) ──
+            'Gemini Shortlist':    '🎯 Gemini' if is_gemini_shortlist else '',
+            'Gemini Rule Match':   gemini_rule_match,
+            'Price MA5':           float(ma5),
+            'Price MA20':          float(ma20),
+            'Price MA50':          float(ma50),
+            'Volume MA5 (Lot)':    float(vol_ma5 / 100),
+            'Volume MA20 (Lot)':   float(vol_ma20 / 100),
         })
 
     df_results = pd.DataFrame(results)
@@ -4267,7 +4321,7 @@ def get_signals_and_data(df_c, df_v, df_h, df_l, df_o, df_ref, min_vol_lot,
                 df_results.at[idx, 'Shakeout Confidence'] = _ctx['confidence']
                 df_results.at[idx, 'Shakeout Warning']    = " | ".join(_ctx['warnings']) if _ctx['warnings'] else "—"
 
-    return df_results, shortlist_keys, prebreakout_keys, silent_accum_keys, skip_log
+    return df_results, shortlist_keys, prebreakout_keys, silent_accum_keys, skip_log, gemini_shortlist_keys
 
 # ─────────────────────────────────────────────
 # 6b. AI CHART ANALYSIS ENGINE (v15)
@@ -4930,7 +4984,7 @@ if btn_analisa:
         ]
 
         if not df_c.empty:
-            df_res, shortlist, prebreakout_list, silent_list, skip_log = get_signals_and_data(
+            df_res, shortlist, prebreakout_list, silent_list, skip_log, gemini_list = get_signals_and_data(
                 df_c, df_v, df_h, df_l, df_o, df_emiten, min_vol_lot,
                 min_mfi_change_watch=min_mfi_change_watch,
                 min_early_score=min_early_score,
@@ -5168,6 +5222,7 @@ if btn_analisa:
                 "shortlist":        shortlist,
                 "prebreakout_list": prebreakout_list,
                 "silent_list":      silent_list,
+                "gemini_list":      gemini_list,   # ── v37 ──
                 "df_res_filtered":  df_res_filtered,
                 "broker_scores":    broker_scores,
                 "moonstock_list":   moonstock_list,
@@ -5192,6 +5247,7 @@ if st.session_state.analisa_hasil is not None:
     shortlist        = _h["shortlist"]
     prebreakout_list = _h["prebreakout_list"]
     silent_list      = _h.get("silent_list", [])
+    gemini_list      = _h.get("gemini_list", [])   # ── v37 ──
     df_res_filtered  = _h["df_res_filtered"]
     broker_scores    = _h.get("broker_scores", {})
     moonstock_list   = _h.get("moonstock_list", [])
@@ -5354,6 +5410,7 @@ if st.session_state.analisa_hasil is not None:
         has_broker_data = enable_broker and bool(broker_scores)
         tab_labels = [
             "🔥 Shortlist Utama",
+            "🎯 Shortlist Gemini",
             "🔭 Pre-Breakout Watch (Opsi A)",
             "🕵️ Silent Accumulation (v18)",
             "🌀 Coil Watch (v23)",
@@ -5367,14 +5424,15 @@ if st.session_state.analisa_hasil is not None:
 
         tabs = st.tabs(tab_labels)
         tab1            = tabs[0]
-        tab2            = tabs[1]
-        tab3            = tabs[2]
-        tab_coil        = tabs[3]
-        tab_explosion   = tabs[4]
-        tab_wyckoff     = tabs[5]
-        tab_float       = tabs[6]
-        tab4            = tabs[7]
-        tab5            = tabs[8] if has_broker_data else None
+        tab_gemini      = tabs[1]
+        tab2            = tabs[2]
+        tab3            = tabs[3]
+        tab_coil        = tabs[4]
+        tab_explosion   = tabs[5]
+        tab_wyckoff     = tabs[6]
+        tab_float       = tabs[7]
+        tab4            = tabs[8]
+        tab5            = tabs[9] if has_broker_data else None
 
         # ═══════════════════════════════════════
         # TAB 1: SHORTLIST UTAMA
@@ -5533,6 +5591,79 @@ if st.session_state.analisa_hasil is not None:
                     )
             else:
                 st.warning("Kolom Wyckoff Phase / Above MA20 / Shakeout Verdict / Shakeout Confidence belum tersedia di data hasil analisa.")
+
+        # ═══════════════════════════════════════
+        # TAB GEMINI: SHORTLIST GEMINI (v37) — replika rule screener Gemini
+        # ═══════════════════════════════════════
+        with tab_gemini:
+            st.subheader("🎯 Shortlist Gemini — Replika Rule Screener Gemini 2P & 7P")
+            st.caption(
+                "Filter di tab ini APA ADANYA meniru rule di screener Gemini kamu "
+                "(Price vs MA20/MA50, Volume spike/MA5/MA20, Free Float < 40%). "
+                "**Bukan skoring bertingkat** seperti Shortlist Utama — jadi saham yang "
+                "masih di fase awal breakout tetap masuk meski ADX/skor Wyckoff belum tinggi. "
+                "Kolom skor app_v36 (Wyckoff, Composite, Shortlist Score, dst) tetap ditampilkan "
+                "di sini sebagai **info tambahan saja** untuk riset lanjutan — bukan sebagai penyaring."
+            )
+
+            df_g = (df_res_filtered[df_res_filtered['Kode Saham'].isin(gemini_list)]
+                    if not df_res_filtered.empty else pd.DataFrame())
+
+            if not df_g.empty:
+                gemini_info_cols = [
+                    'Gemini Rule Match', 'Price MA5', 'Price MA20', 'Price MA50',
+                    'Volume MA5 (Lot)', 'Volume MA20 (Lot)',
+                ]
+                gemini_context_cols = [
+                    'Wyckoff Score', 'Wyckoff Phase', 'WAS', 'Shortlist Score',
+                    'Composite Rank', 'ADX (14)', 'ADX Direction',
+                ]
+                cols_g = [c for c in (base_cols + gemini_info_cols + gemini_context_cols)
+                          if c in df_g.columns]
+                # Urutkan berdasarkan Wyckoff Score / Shortlist Score sebagai referensi kualitas
+                # (bukan filter — semua tetap tampil, hanya urutan tampilan)
+                _sort_g = [c for c in ['Wyckoff Score', 'Shortlist Score'] if c in df_g.columns]
+                if _sort_g:
+                    df_g = df_g.sort_values(_sort_g, ascending=False)
+
+                st.dataframe(
+                    apply_full_style(df_g[cols_g].style, include_score=False),
+                    use_container_width=True
+                )
+
+                n_overlap = df_g['Kode Saham'].isin(shortlist).sum()
+                st.caption(
+                    f"📊 {len(df_g)} saham lolos Shortlist Gemini. "
+                    f"{n_overlap} di antaranya juga masuk Shortlist Utama app_v36 "
+                    f"(overlap dua sistem); sisanya kandidat yang HANYA ditangkap rule Gemini "
+                    f"— biasanya saham di fase paling awal yang belum lolos hard filter ADX Bullish "
+                    f"atau threshold skor Shortlist Utama."
+                )
+
+                st.markdown("#### 📈 TradingView Chart")
+                st.caption("Pilih nama saham dari dropdown untuk melihat chart TradingView langsung di sini.")
+                ticker_list_g = df_g['Kode Saham'].tolist()
+                default_idx_g = ticker_list_g.index(st.session_state.tv_ticker) \
+                    if st.session_state.tv_ticker in ticker_list_g else 0
+                selected_tv_g = st.selectbox(
+                    "🔍 Pilih saham untuk chart:", ticker_list_g,
+                    index=default_idx_g, key="tv_select_tab_gemini"
+                )
+                if selected_tv_g:
+                    st.session_state.tv_ticker = selected_tv_g
+                    chart_mode_g = st.radio(
+                        "Mode Chart:", ["📊 Plotly Candlestick (Interaktif)", "📈 TradingView Widget"],
+                        key="chart_mode_tab_gemini", horizontal=True
+                    )
+                    if "Plotly" in chart_mode_g:
+                        show_plotly_candlestick(selected_tv_g, chart_key=f"plotly_tab_gemini_{selected_tv_g}", end_date=_end_d_render)
+                    else:
+                        show_tradingview_widget(selected_tv_g)
+            else:
+                st.info(
+                    "Tidak ada saham yang lolos rule Gemini (2P atau 7P) untuk tanggal/universe ini. "
+                    "Coba perluas universe saham yang di-scan atau cek tanggal analisa."
+                )
 
         # ═══════════════════════════════════════
         # TAB 2: PRE-BREAKOUT WATCH LIST (OPSI A)
